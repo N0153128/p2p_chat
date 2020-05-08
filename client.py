@@ -5,9 +5,14 @@ from random import randint
 from time import sleep
 import sys
 import requests
+import stun
 
 
 username = input('Type your name: ')
+source_ip = '0.0.0.0'
+source_port = 8547
+nat = stun.get_ip_info(source_ip, source_port, stun_host='stun.l.google.com', stun_port=19302)
+print(f'Your IP: {nat[1]}:{nat[2]}')
 
 
 class Peers:
@@ -78,7 +83,7 @@ class Client:
         if join is None:
             try:
                 while True:
-                    msg = input()
+                    msg = input('> ')
                     sock.send(f'<{name}>: {msg}'.encode('utf-8'))
             except KeyboardInterrupt:
                 sock.send(f'{name} disconnected')
@@ -108,32 +113,67 @@ class Client:
     @staticmethod
     def update_peers(pee):
         Peers.peers = str(pee, 'utf-8').split(',')[:-1]
-# if len(argv) > 1:
-#     client = Client()
-# else:
-#     server = Server()
 
 
-while True:
-    try:
-        print('Trying to connect...')
-        sleep(randint(1, 5))
-        for peer in Peers.peers:
-            try:
-                client = Client(peer)
-            except KeyboardInterrupt:
-                print('Exiting...')
-                sys.exit(0)
-            except Exception as e:
-                print(e)
-                pass
-            if randint(1, 10) == 1:
+class UDPClient:
+
+    def __init__(self, ip, port):
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind((source_ip, source_port))
+
+        self.remote = (ip, int(port))
+        # creating thread
+
+        trd0 = threading.Thread(target=self.handler)
+        trd0.daemon = True
+        trd0.start()
+
+        while True:
+            data, participant = self.sock.recvfrom(1024)
+            print(data.decode())
+
+    def handler(self):
+        try:
+            self.sock.sendto(f'{username} connected'.encode(), self.remote)
+        except Exception as e:
+            print(e)
+        try:
+            while True:
+                msg = f'<{username}>:{input("> ")}'
+                self.sock.sendto(msg.encode(), self.remote)
+        except Exception as error:
+            print(f'closing socket because {error}')
+            self.sock.sendto(f'{username} disconnected'.encode(), self.remote)
+            self.sock.close()
+            sys.exit(0)
+
+
+if sys.argv[1] == 'l'.lower():
+    while True:
+        try:
+            print('Trying to connect...')
+            sleep(randint(1, 5))
+            for peer in Peers.peers:
                 try:
-                    print('Failed to connect, running server...')
-                    server = Server()
-                except Exception as e:
-                    print(f'Couldn\'t start the server because...{e}')
+                    client = Client(peer)
+                except KeyboardInterrupt:
+                    print('Exiting...')
+                    sys.exit(0)
+                except Exception as err:
+                    print(err)
+                    pass
+                if randint(1, 10) == 1:
+                    try:
+                        print('Failed to connect, running server...')
+                        server = Server()
+                    except Exception as err:
+                        print(f'Couldn\'t start the server because...{err}')
 
-    except KeyboardInterrupt:
-        print('Exiting...')
-        sys.exit(0)
+        except KeyboardInterrupt:
+            print('Exiting...')
+            sys.exit(0)
+
+elif sys.argv[1] == 'g'.lower():
+    remote_ip, remote_port = input('Your participant\'s address: ').split(':')
+    udp = UDPClient(remote_ip, remote_port)
