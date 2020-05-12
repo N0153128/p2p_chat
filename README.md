@@ -1,4 +1,4 @@
-# p2p_chat\n
+# p2p_chat
 Simple p2p chat that works in both local and global networks.
 
 USAGE:
