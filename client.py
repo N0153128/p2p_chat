@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import os
 import socket
 import threading
@@ -8,21 +10,32 @@ import signal
 from colorama import Fore, Style
 from time import sleep, time
 
+import nacl.public
+import nacl.utils
+
 
 DISCOVERY_PORT     = 8547       # well-known port used only for LAN beacon broadcast
 BROADCAST_INTERVAL = 1          # seconds between LAN discovery beacons
 BROADCAST_TIMEOUT  = 30         # seconds to wait for a peer on LAN
 PUNCH_INTERVAL     = 0.5
 PUNCH_TIMEOUT      = 30
-PUNCH_MSG          = b'__punch__'
-PUNCH_ACK          = b'__punch_ack__'
-DISCONNECT_MSG     = b'__disconnect__'
-# Beacon format: b'__beacon__:<session_id>:<chat_port>'
-# session_id  — random per run, used to ignore our own broadcast echo
-# chat_port   — the sender's main chat socket port, so the peer knows where to send
+
+# Wire protocol prefixes (all unencrypted — sent before the Box is established)
 BEACON_PREFIX      = b'__beacon__:'
+# PUNCH_MSG format: b'__punch__:<32-byte-pubkey-hex>'
+PUNCH_PREFIX       = b'__punch__:'
+# PUNCH_ACK format: b'__punch_ack__:<32-byte-pubkey-hex>'
+PUNCH_ACK_PREFIX   = b'__punch_ack__:'
+# After the Box is established all payloads are encrypted nacl boxes.
+# Control messages sent inside the encrypted channel:
+CTRL_DISCONNECT    = b'__disconnect__'
+
 SESSION_ID         = '%08x' % random.randint(0, 0xFFFFFFFF)
 
+
+# ---------------------------------------------------------------------------
+# STUN
+# ---------------------------------------------------------------------------
 
 def stun_get_external(sock, stun_host='stun.l.google.com', stun_port=19302):
     old_timeout = sock.gettimeout()
@@ -53,6 +66,10 @@ def stun_get_external(sock, stun_host='stun.l.google.com', stun_port=19302):
     return None, None
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _is_local(ip):
     """Return True if ip is on the same /24 subnet as local_ip, or is loopback."""
     if ip == '127.0.0.1' or ip == local_ip:
@@ -63,6 +80,11 @@ def _is_local(ip):
 def _broadcast_addr():
     """Return the /24 broadcast address for local_ip (e.g. 192.168.1.255)."""
     return local_ip.rsplit('.', 1)[0] + '.255'
+
+
+def _beacon_hmac(room_code, session_id):
+    """Return a 16-byte hex HMAC-SHA256 tag over session_id using room_code as key."""
+    return hmac.new(room_code.encode(), session_id.encode(), hashlib.sha256).hexdigest()[:16]
 
 
 print_lock = threading.Lock()
@@ -76,17 +98,19 @@ def print_msg(msg):
         sys.stdout.flush()
 
 
-def lan_discover(chat_port):
-    """
-    Broadcast beacons on DISCOVERY_PORT using a temporary socket, return (ip, port)
-    of the discovered peer's chat socket.
+# ---------------------------------------------------------------------------
+# LAN discovery  (fix for issue #1 — beacon authentication)
+# ---------------------------------------------------------------------------
 
-    Each beacon embeds our session ID (to filter our own echo) and our chat_port
-    so the peer knows which port to connect to — critical when both peers run on
-    the same machine and can't share a single port.
+def lan_discover(chat_port, room_code):
     """
-    # Separate discovery socket bound to the well-known port so peers can find us.
-    # SO_REUSEADDR lets both peers bind the same discovery port on the same machine.
+    Broadcast authenticated beacons on DISCOVERY_PORT, return (ip, port) of peer.
+
+    Beacon format: __beacon__:<session_id>:<chat_port>:<hmac>
+    The HMAC ties the beacon to room_code so only peers sharing the same
+    room code can discover each other. Beacons with an invalid HMAC are
+    silently dropped, preventing unauthenticated peer hijacking (issue #1).
+    """
     disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     disc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     disc.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -94,7 +118,8 @@ def lan_discover(chat_port):
     disc.settimeout(BROADCAST_INTERVAL)
 
     broadcast = _broadcast_addr()
-    my_beacon = BEACON_PREFIX + f'{SESSION_ID}:{chat_port}'.encode()
+    tag = _beacon_hmac(room_code, SESSION_ID)
+    my_beacon = BEACON_PREFIX + f'{SESSION_ID}:{chat_port}:{tag}'.encode()
 
     print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Scanning local network for a peer...')
     deadline = time() + BROADCAST_TIMEOUT
@@ -115,18 +140,22 @@ def lan_discover(chat_port):
                 continue
             payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
             parts = payload.split(':')
-            if len(parts) != 2:
+            if len(parts) != 3:
                 continue
-            peer_sid, peer_port_str = parts
+            peer_sid, peer_port_str, peer_tag = parts
             if peer_sid == SESSION_ID:
                 continue  # our own echo
+
+            # Verify HMAC — rejects beacons from peers with a different room code
+            expected = _beacon_hmac(room_code, peer_sid)
+            if not hmac.compare_digest(peer_tag, expected):
+                continue
 
             try:
                 peer_port = int(peer_port_str)
             except ValueError:
                 continue
 
-            # Reply so the other side exits its loop too.
             try:
                 disc.sendto(my_beacon, addr)
             except Exception:
@@ -138,29 +167,54 @@ def lan_discover(chat_port):
     return None
 
 
+# ---------------------------------------------------------------------------
+# UDPClient  (fixes for issues #2 and #3)
+# ---------------------------------------------------------------------------
+
 class UDPClient:
+    """
+    Encrypted, authenticated peer-to-peer UDP chat session.
+
+    Issue #2 fix — encryption:
+      An ephemeral X25519 keypair is generated per session. During the
+      hole-punch handshake each peer sends their public key inside the
+      PUNCH_MSG / PUNCH_ACK. Once both public keys are known a
+      nacl.public.Box (XSalsa20-Poly1305) is established. Every message
+      sent after that point is encrypted and authenticated.
+
+    Issue #3 fix — source address validation:
+      All packets from addresses other than self.remote are silently
+      dropped in _recv_loop, preventing control-message injection.
+    """
 
     def __init__(self, ip, sock, port):
         self.sock = sock
         self.remote = (ip, port)
         self.connected = threading.Event()
         self.done = threading.Event()
+        self.box = None                     # set once key exchange completes
+
+        # Ephemeral keypair for this session
+        self._privkey = nacl.public.PrivateKey.generate()
+        self._pubkey_bytes = bytes(self._privkey.public_key)
 
         signal.signal(signal.SIGINT, self._handle_sigint)
 
         if _is_local(ip):
-            self.connected.set()
-            print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected!')
+            # LAN — no NAT, but still do the key exchange via punch messages
+            punch_thread = threading.Thread(target=self._punch)
+            punch_thread.daemon = True
+            punch_thread.start()
         else:
             print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Punching through NAT...')
             punch_thread = threading.Thread(target=self._punch)
             punch_thread.daemon = True
             punch_thread.start()
 
-            if not self.connected.wait(timeout=PUNCH_TIMEOUT):
-                print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
-                print('Your peer may be behind Symmetric NAT, or started too late.')
-                return
+        if not self.connected.wait(timeout=PUNCH_TIMEOUT):
+            print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
+            print('Your peer may be behind Symmetric NAT, or started too late.')
+            return
 
         send_thread = threading.Thread(target=self._send_loop)
         send_thread.daemon = True
@@ -170,18 +224,29 @@ class UDPClient:
 
     def _handle_sigint(self, sig, frame):
         try:
-            self.sock.sendto(DISCONNECT_MSG, self.remote)
+            if self.box:
+                self.sock.sendto(self.box.encrypt(CTRL_DISCONNECT), self.remote)
         except Exception:
             pass
         print()
         self.done.set()
         sys.exit(0)
 
+    def _make_punch_msg(self):
+        return PUNCH_PREFIX + self._pubkey_bytes.hex().encode()
+
+    def _make_punch_ack(self):
+        return PUNCH_ACK_PREFIX + self._pubkey_bytes.hex().encode()
+
+    def _build_box(self, peer_pubkey_hex):
+        peer_pub = nacl.public.PublicKey(bytes.fromhex(peer_pubkey_hex))
+        self.box = nacl.public.Box(self._privkey, peer_pub)
+
     def _punch(self):
         deadline = time() + PUNCH_TIMEOUT
         while not self.connected.is_set() and time() < deadline:
             try:
-                self.sock.sendto(PUNCH_MSG, self.remote)
+                self.sock.sendto(self._make_punch_msg(), self.remote)
             except Exception:
                 pass
             sleep(PUNCH_INTERVAL)
@@ -189,30 +254,53 @@ class UDPClient:
     def _recv_loop(self):
         while True:
             try:
-                data, addr = self.sock.recvfrom(4096)
+                data, addr = self.sock.recvfrom(65535)
             except OSError:
                 break
 
-            if data.startswith(BEACON_PREFIX):
-                continue  # stray discovery beacon, ignore
+            # Issue #3: drop packets from unexpected sources
+            if addr != self.remote:
+                continue
 
-            if data == PUNCH_MSG:
+            if data.startswith(BEACON_PREFIX):
+                continue
+
+            if data.startswith(PUNCH_PREFIX):
+                peer_pubkey_hex = data[len(PUNCH_PREFIX):].decode(errors='ignore')
                 try:
-                    self.sock.sendto(PUNCH_ACK, self.remote)
+                    self._build_box(peer_pubkey_hex)
+                except Exception:
+                    continue
+                try:
+                    self.sock.sendto(self._make_punch_ack(), self.remote)
                 except Exception:
                     pass
                 if not self.connected.is_set():
                     self.connected.set()
-                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected!')
+                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected! (encrypted)')
                 continue
 
-            if data == PUNCH_ACK:
+            if data.startswith(PUNCH_ACK_PREFIX):
+                peer_pubkey_hex = data[len(PUNCH_ACK_PREFIX):].decode(errors='ignore')
+                try:
+                    self._build_box(peer_pubkey_hex)
+                except Exception:
+                    continue
                 if not self.connected.is_set():
                     self.connected.set()
-                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected!')
+                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected! (encrypted)')
                 continue
 
-            if data == DISCONNECT_MSG:
+            # Everything after the handshake is an encrypted box
+            if self.box is None:
+                continue  # key exchange not done yet, discard
+
+            try:
+                plaintext = self.box.decrypt(data)
+            except Exception:
+                continue  # authentication failed — drop silently
+
+            if plaintext == CTRL_DISCONNECT:
                 with print_lock:
                     sys.stdout.write(f'\r{" " * 80}\r')
                     print(Fore.LIGHTYELLOW_EX + Style.BRIGHT + 'Peer disconnected.')
@@ -224,12 +312,14 @@ class UDPClient:
                     pass
                 break
 
-            print_msg(data.decode('utf-8', errors='replace'))
+            print_msg(plaintext.decode('utf-8', errors='replace'))
 
     def _send_loop(self):
         self.connected.wait()
         try:
-            self.sock.sendto(f'{username} connected'.encode(), self.remote)
+            if self.box:
+                self.sock.sendto(
+                    self.box.encrypt(f'{username} connected'.encode()), self.remote)
         except Exception:
             pass
         try:
@@ -240,11 +330,17 @@ class UDPClient:
                 msg = sys.stdin.readline().rstrip('\n')
                 if self.done.is_set():
                     break
-                if msg:
-                    self.sock.sendto(f'<{username}>: {msg}'.encode('utf-8'), self.remote)
+                if msg and self.box:
+                    self.sock.sendto(
+                        self.box.encrypt(f'<{username}>: {msg}'.encode('utf-8')),
+                        self.remote)
         except (KeyboardInterrupt, EOFError):
             pass
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     username = input('Type your name: ')
@@ -257,8 +353,6 @@ if __name__ == '__main__':
     except Exception:
         local_ip = '127.0.0.1'
 
-    # Chat socket binds to a unique OS-assigned port per instance.
-    # This avoids port conflicts when two peers run on the same machine.
     _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     _sock.bind(('0.0.0.0', 0))
@@ -266,16 +360,21 @@ if __name__ == '__main__':
 
     ext_ip, _ = stun_get_external(_sock)
     print(f'Your public IP (internet): {ext_ip or "unavailable"}')
+    print(f'Your chat port:            {_chat_port}')
     print()
     print('  l  — find a peer on this network automatically')
-    print('  g  — connect to a peer on the internet (enter their IP)')
+    print('  g  — connect to a peer on the internet (enter their IP and port)')
     print()
 
     while True:
         try:
             mode = input('Mode (l/g): ').strip().lower()
             if mode == 'l':
-                peer_addr = lan_discover(_chat_port)
+                room_code = input('Room code (share this with your peer): ').strip()
+                if not room_code:
+                    print('Room code cannot be empty.')
+                    continue
+                peer_addr = lan_discover(_chat_port, room_code)
                 if peer_addr is None:
                     print(Fore.LIGHTRED_EX + Style.BRIGHT + 'No peer found on the local network.')
                     continue
@@ -284,7 +383,7 @@ if __name__ == '__main__':
                 peer_ip = input('Peer\'s public IP: ').strip()
                 if not peer_ip:
                     continue
-                peer_port = int(input(f'Peer\'s port (default {DISCOVERY_PORT}): ').strip() or DISCOVERY_PORT)
+                peer_port = int(input(f'Peer\'s port: ').strip())
                 UDPClient(peer_ip, _sock, port=peer_port)
             else:
                 print('Enter l or g.')

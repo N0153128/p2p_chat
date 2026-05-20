@@ -17,6 +17,7 @@ import threading
 import time
 
 import pytest
+import nacl.public
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 import client  # noqa: E402
@@ -36,6 +37,15 @@ def make_udp_sock(bind_ip='127.0.0.1'):
 
 def addr_of(sock):
     return sock.getsockname()
+
+
+def make_box_pair():
+    """Return two nacl.public.Box objects that can decrypt each other's output."""
+    priv_a = nacl.public.PrivateKey.generate()
+    priv_b = nacl.public.PrivateKey.generate()
+    box_a = nacl.public.Box(priv_a, priv_b.public_key)
+    box_b = nacl.public.Box(priv_b, priv_a.public_key)
+    return box_a, box_b
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +162,6 @@ class TestStunGetExternal:
 # ---------------------------------------------------------------------------
 
 class TestIsLocal:
-    # local_ip is patched to '127.0.0.1' by patch_globals
 
     def test_loopback(self):
         assert client._is_local('127.0.0.1') is True
@@ -189,7 +198,38 @@ class TestBroadcastAddr:
 
 
 # ---------------------------------------------------------------------------
-# UDPClient — integration tests on loopback
+# _beacon_hmac  (issue #1 — authenticated discovery)
+# ---------------------------------------------------------------------------
+
+class TestBeaconHmac:
+
+    def test_same_room_code_same_session_matches(self):
+        """Same room code + session ID always produces the same tag."""
+        tag1 = client._beacon_hmac('secret', 'abc123')
+        tag2 = client._beacon_hmac('secret', 'abc123')
+        assert tag1 == tag2
+
+    def test_different_room_code_differs(self):
+        """Different room codes produce different tags for the same session."""
+        tag1 = client._beacon_hmac('room-a', 'abc123')
+        tag2 = client._beacon_hmac('room-b', 'abc123')
+        assert tag1 != tag2
+
+    def test_different_session_differs(self):
+        """Same room code but different session IDs produce different tags."""
+        tag1 = client._beacon_hmac('secret', 'aaa')
+        tag2 = client._beacon_hmac('secret', 'bbb')
+        assert tag1 != tag2
+
+    def test_tag_is_16_hex_chars(self):
+        """Output is exactly 16 lowercase hex characters (64-bit prefix of SHA256 HMAC)."""
+        tag = client._beacon_hmac('myroom', 'sid1234')
+        assert len(tag) == 16
+        assert all(c in '0123456789abcdef' for c in tag)
+
+
+# ---------------------------------------------------------------------------
+# UDPClient helpers — object construction bypassing __init__
 # ---------------------------------------------------------------------------
 
 def make_client_obj(sock, remote_addr=('127.0.0.1', 9999)):
@@ -199,129 +239,370 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999)):
     c.remote = remote_addr
     c.connected = threading.Event()
     c.done = threading.Event()
+    c.box = None
+    priv = nacl.public.PrivateKey.generate()
+    c._privkey = priv
+    c._pubkey_bytes = bytes(priv.public_key)
     return c
 
 
-class TestUDPClientLAN:
+# ---------------------------------------------------------------------------
+# UDPClient — key exchange helpers
+# ---------------------------------------------------------------------------
 
-    def test_lan_connects_immediately(self):
-        """On loopback _is_local returns True so connected is set without punching."""
-        sock_a = make_udp_sock()
-        c = make_client_obj(sock_a)
-        # Simulate what __init__ does for the LAN path
-        c.connected.set()
-        assert c.connected.is_set()
-        sock_a.close()
+class TestUDPClientKeyExchange:
 
-    def test_peers_exchange_messages(self):
-        """Messages sent by one socket are received by the other."""
+    def test_make_punch_msg_starts_with_prefix(self):
+        """_make_punch_msg returns PUNCH_PREFIX + pubkey hex."""
+        sock = make_udp_sock()
+        c = make_client_obj(sock)
+        msg = c._make_punch_msg()
+        assert msg.startswith(client.PUNCH_PREFIX)
+        pubkey_hex = msg[len(client.PUNCH_PREFIX):].decode()
+        assert len(pubkey_hex) == 64  # 32 bytes → 64 hex chars
+        sock.close()
+
+    def test_make_punch_ack_starts_with_prefix(self):
+        """_make_punch_ack returns PUNCH_ACK_PREFIX + pubkey hex."""
+        sock = make_udp_sock()
+        c = make_client_obj(sock)
+        ack = c._make_punch_ack()
+        assert ack.startswith(client.PUNCH_ACK_PREFIX)
+        pubkey_hex = ack[len(client.PUNCH_ACK_PREFIX):].decode()
+        assert len(pubkey_hex) == 64
+        sock.close()
+
+    def test_build_box_enables_encrypt_decrypt(self):
+        """After _build_box the UDPClient can encrypt and decrypt with the peer's key."""
+        priv_peer = nacl.public.PrivateKey.generate()
+        peer_pub_hex = bytes(priv_peer.public_key).hex()
+
+        sock = make_udp_sock()
+        c = make_client_obj(sock)
+        c._build_box(peer_pub_hex)
+        assert c.box is not None
+
+        # Verify the box can actually round-trip a message
+        box_peer = nacl.public.Box(priv_peer, c._privkey.public_key)
+        ciphertext = c.box.encrypt(b'hello')
+        plaintext = box_peer.decrypt(ciphertext)
+        assert plaintext == b'hello'
+        sock.close()
+
+    def test_build_box_invalid_hex_raises(self):
+        """_build_box raises an exception on bad pubkey hex."""
+        sock = make_udp_sock()
+        c = make_client_obj(sock)
+        with pytest.raises(Exception):
+            c._build_box('not-valid-hex')
+        sock.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — _recv_loop: source address validation (issue #3)
+# ---------------------------------------------------------------------------
+
+class TestSourceAddressValidation:
+
+    def test_packets_from_wrong_source_are_dropped(self):
+        """_recv_loop ignores packets that do not originate from self.remote."""
         sock_a = make_udp_sock()
-        sock_b = make_udp_sock()
-        port_b = addr_of(sock_b)[1]
+        sock_b = make_udp_sock()   # legitimate peer
+        sock_c = make_udp_sock()   # attacker
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        box_b, box_a = make_box_pair()
+        c.box = box_a
 
         received = []
+        original_print_msg = client.print_msg
 
-        def recv_one():
-            sock_b.settimeout(2)
-            try:
-                data, _ = sock_b.recvfrom(4096)
-                received.append(data)
-            except socket.timeout:
-                pass
+        def capturing_print_msg(msg):
+            received.append(msg)
 
-        t = threading.Thread(target=recv_one, daemon=True)
-        t.start()
-        sock_a.sendto(b'<Tester>: hello', ('127.0.0.1', port_b))
-        t.join(timeout=3)
+        client.print_msg = capturing_print_msg
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
 
-        assert b'<Tester>: hello' in received
+            # Attacker sends an encrypted-looking payload from wrong address
+            sock_c.sendto(box_b.encrypt(b'injected'), addr_of(sock_a))
+            time.sleep(0.05)
+
+            # Legitimate peer sends a real message, then disconnects
+            sock_b.sendto(box_b.encrypt(b'real message'), addr_of(sock_a))
+            time.sleep(0.05)
+            sock_b.sendto(box_b.encrypt(client.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            client.print_msg = original_print_msg
+
+        assert 'real message' in received
+        assert 'injected' not in received
+        sock_a.close()
+        sock_b.close()
+        sock_c.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — _recv_loop: encryption (issue #2)
+# ---------------------------------------------------------------------------
+
+class TestEncryption:
+
+    def test_encrypted_message_decrypted_and_displayed(self):
+        """An encrypted message from the legitimate peer is decrypted and shown."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        box_b, box_a = make_box_pair()
+        c.box = box_a
+
+        received = []
+        original_print_msg = client.print_msg
+
+        def capturing_print_msg(msg):
+            received.append(msg)
+
+        client.print_msg = capturing_print_msg
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+
+            sock_b.sendto(box_b.encrypt(b'secret text'), addr_of(sock_a))
+            time.sleep(0.1)
+            sock_b.sendto(box_b.encrypt(client.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            client.print_msg = original_print_msg
+
+        assert 'secret text' in received
+
         sock_a.close()
         sock_b.close()
 
-    def test_disconnect_message_delivered(self):
-        """DISCONNECT_MSG sent by one peer arrives at the other."""
+    def test_unauthenticated_payload_dropped(self):
+        """A plaintext (non-Box) payload is dropped without crashing or displaying."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
-        port_b = addr_of(sock_b)[1]
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        _, box_a = make_box_pair()
+        c.box = box_a
 
         received = []
+        original_print_msg = client.print_msg
 
-        def recv_one():
-            sock_b.settimeout(2)
-            try:
-                data, _ = sock_b.recvfrom(4096)
-                received.append(data)
-            except socket.timeout:
-                pass
+        def capturing_print_msg(msg):
+            received.append(msg)
 
-        t = threading.Thread(target=recv_one, daemon=True)
-        t.start()
-        sock_a.sendto(client.DISCONNECT_MSG, ('127.0.0.1', port_b))
-        t.join(timeout=3)
+        client.print_msg = capturing_print_msg
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
 
-        assert client.DISCONNECT_MSG in received
+            # Send raw plaintext — box.decrypt will fail → should be silently dropped
+            sock_b.sendto(b'not encrypted', addr_of(sock_a))
+            time.sleep(0.1)
+
+            # Clean shutdown via a properly encrypted disconnect
+            _, box_b_good = make_box_pair()
+            # We need a matching box — build one from c's actual privkey
+            priv_peer = nacl.public.PrivateKey.generate()
+            box_legit_peer = nacl.public.Box(priv_peer, c._privkey.public_key)
+            c.box = nacl.public.Box(c._privkey, priv_peer.public_key)
+
+            sock_b.sendto(box_legit_peer.encrypt(client.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            client.print_msg = original_print_msg
+
+        assert received == []
         sock_a.close()
         sock_b.close()
 
-
-class TestUDPClientHolePunching:
-
-    def test_punch_msg_triggers_ack(self):
-        """Receiving PUNCH_MSG causes the peer to reply with PUNCH_ACK."""
+    def test_pre_handshake_payload_discarded(self):
+        """Encrypted payloads arriving before box is set are silently dropped."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
-        port_a = addr_of(sock_a)[1]
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        # box stays None — simulating pre-handshake state
+
+        received = []
+        original_print_msg = client.print_msg
+
+        def capturing_print_msg(msg):
+            received.append(msg)
+
+        client.print_msg = capturing_print_msg
+
+        # Give _recv_loop a moment then close the socket to end it
+        def stop_recv():
+            time.sleep(0.2)
+            sock_a.close()
+
+        client.print_msg = capturing_print_msg
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            stopper = threading.Thread(target=stop_recv, daemon=True)
+            t.start()
+            stopper.start()
+            time.sleep(0.05)
+            sock_b.sendto(b'some data before handshake', addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            client.print_msg = original_print_msg
+
+        assert received == []
+        sock_b.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — _recv_loop: PUNCH handshake via _recv_loop
+# ---------------------------------------------------------------------------
+
+class TestPunchHandshakeInRecvLoop:
+
+    def test_punch_msg_triggers_ack_and_sets_connected(self):
+        """Receiving a PUNCH message causes a PUNCH_ACK reply and sets connected."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
 
         c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
 
-        def run_recv():
-            sock_a.settimeout(2)
+        priv_b = nacl.public.PrivateKey.generate()
+        punch_from_b = client.PUNCH_PREFIX + bytes(priv_b.public_key).hex().encode()
+
+        replies = []
+
+        def run():
+            sock_b.settimeout(2)
+            # send punch to trigger the handshake in _recv_loop
+            sock_b.sendto(punch_from_b, addr_of(sock_a))
             try:
-                data, addr = sock_a.recvfrom(4096)
-                if data == client.PUNCH_MSG:
-                    sock_a.sendto(client.PUNCH_ACK, addr)
-                    c.connected.set()
+                data, _ = sock_b.recvfrom(4096)
+                replies.append(data)
             except socket.timeout:
                 pass
+            # shut down the recv_loop
+            time.sleep(0.05)
+            sock_a.close()
 
-        t = threading.Thread(target=run_recv, daemon=True)
-        t.start()
-        sock_b.sendto(client.PUNCH_MSG, ('127.0.0.1', port_a))
-        t.join(timeout=3)
+        t_helper = threading.Thread(target=run, daemon=True)
+        t_recv = threading.Thread(target=c._recv_loop, daemon=True)
+        t_recv.start()
+        t_helper.start()
+        t_helper.join(timeout=4)
+        t_recv.join(timeout=2)
 
-        sock_b.settimeout(2)
-        data, _ = sock_b.recvfrom(4096)
-        assert data == client.PUNCH_ACK
         assert c.connected.is_set()
-
-        sock_a.close()
+        assert any(r.startswith(client.PUNCH_ACK_PREFIX) for r in replies)
         sock_b.close()
 
     def test_punch_ack_sets_connected(self):
-        """Receiving PUNCH_ACK sets the connected event."""
+        """Receiving a PUNCH_ACK sets the connected event."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
-        port_a = addr_of(sock_a)[1]
 
         c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
 
-        def run_recv():
-            sock_a.settimeout(2)
-            try:
-                data, _ = sock_a.recvfrom(4096)
-                if data == client.PUNCH_ACK:
-                    c.connected.set()
-            except socket.timeout:
-                pass
+        priv_b = nacl.public.PrivateKey.generate()
+        ack_from_b = client.PUNCH_ACK_PREFIX + bytes(priv_b.public_key).hex().encode()
 
-        t = threading.Thread(target=run_recv, daemon=True)
-        t.start()
-        sock_b.sendto(client.PUNCH_ACK, ('127.0.0.1', port_a))
-        t.join(timeout=3)
+        def run():
+            time.sleep(0.05)
+            sock_b.sendto(ack_from_b, addr_of(sock_a))
+            time.sleep(0.1)
+            sock_a.close()
+
+        t_helper = threading.Thread(target=run, daemon=True)
+        t_recv = threading.Thread(target=c._recv_loop, daemon=True)
+        t_recv.start()
+        t_helper.start()
+        t_helper.join(timeout=3)
+        t_recv.join(timeout=2)
 
         assert c.connected.is_set()
+        sock_b.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — disconnect handling
+# ---------------------------------------------------------------------------
+
+class TestDisconnect:
+
+    def test_ctrl_disconnect_sets_done(self):
+        """Receiving CTRL_DISCONNECT (encrypted) sets done and exits _recv_loop."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        box_b, box_a = make_box_pair()
+        c.box = box_a
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_b.sendto(box_b.encrypt(client.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+
+        assert c.done.is_set()
         sock_a.close()
         sock_b.close()
+
+    def test_beacon_ignored_during_chat(self):
+        """Beacon packets received during a session are silently discarded."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        box_b, box_a = make_box_pair()
+        c.box = box_a
+
+        received = []
+        original_print_msg = client.print_msg
+
+        def capturing_print_msg(msg):
+            received.append(msg)
+
+        client.print_msg = capturing_print_msg
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            # Send a stray beacon (should be ignored)
+            stray_beacon = client.BEACON_PREFIX + b'deadbeef:1234:abcd1234abcd1234'
+            sock_b.sendto(stray_beacon, addr_of(sock_a))
+            time.sleep(0.05)
+            # Send a real encrypted message
+            sock_b.sendto(box_b.encrypt(b'hello'), addr_of(sock_a))
+            time.sleep(0.05)
+            sock_b.sendto(box_b.encrypt(client.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            client.print_msg = original_print_msg
+
+        assert received == ['hello']
+        sock_a.close()
+        sock_b.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — _punch stops after timeout
+# ---------------------------------------------------------------------------
+
+class TestPunchTimeout:
 
     def test_punch_stops_after_timeout(self):
         """_punch stops sending after PUNCH_TIMEOUT expires."""
@@ -340,65 +621,3 @@ class TestUDPClientHolePunching:
         assert elapsed >= 1
         assert not c.connected.is_set()
         sock_a.close()
-
-
-class TestUDPClientDone:
-
-    def test_done_set_on_disconnect_msg(self):
-        """_recv_loop sets done and exits when DISCONNECT_MSG arrives."""
-        sock_a = make_udp_sock()
-        sock_b = make_udp_sock()
-        port_a = addr_of(sock_a)[1]
-
-        c = make_client_obj(sock_a)
-        c.connected.set()
-
-        old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
-        try:
-            t = threading.Thread(target=c._recv_loop, daemon=True)
-            t.start()
-            time.sleep(0.1)
-            sock_b.sendto(client.DISCONNECT_MSG, ('127.0.0.1', port_a))
-            t.join(timeout=3)
-        finally:
-            sys.stdout = old_stdout
-
-        assert c.done.is_set()
-        sock_a.close()
-        sock_b.close()
-
-    def test_beacon_ignored_during_chat(self):
-        """Beacon packets received during a session are silently discarded."""
-        sock_a = make_udp_sock()
-        sock_b = make_udp_sock()
-        port_a = addr_of(sock_a)[1]
-
-        c = make_client_obj(sock_a)
-        c.connected.set()
-
-        chat_received = []
-        original_print_msg = client.print_msg
-
-        def capturing_print_msg(msg):
-            chat_received.append(msg)
-
-        client.print_msg = capturing_print_msg
-        try:
-            t = threading.Thread(target=c._recv_loop, daemon=True)
-            t.start()
-            time.sleep(0.1)
-            # Send a beacon (should be ignored), then a chat message, then disconnect
-            stray_beacon = client.BEACON_PREFIX + b'deadbeef'
-            sock_b.sendto(stray_beacon, ('127.0.0.1', port_a))
-            time.sleep(0.1)
-            sock_b.sendto(b'hello', ('127.0.0.1', port_a))
-            time.sleep(0.1)
-            sock_b.sendto(client.DISCONNECT_MSG, ('127.0.0.1', port_a))
-            t.join(timeout=3)
-        finally:
-            client.print_msg = original_print_msg
-
-        assert chat_received == ['hello']
-        sock_a.close()
-        sock_b.close()
