@@ -234,12 +234,16 @@ class TestBeaconHmac:
 
 def make_client_obj(sock, remote_addr=('127.0.0.1', 9999)):
     """Construct a UDPClient bypassing __init__, wiring up attributes manually."""
+    from colorama import Fore
     c = client.UDPClient.__new__(client.UDPClient)
     c.sock = sock
     c.remote = remote_addr
     c.connected = threading.Event()
     c.done = threading.Event()
     c.box = None
+    c.name_colour = Fore.CYAN
+    c.text_colour = Fore.WHITE
+    c.peer_name_colour = Fore.CYAN
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
@@ -317,8 +321,8 @@ class TestSourceAddressValidation:
         received = []
         original_print_msg = client.print_msg
 
-        def capturing_print_msg(msg):
-            received.append(msg)
+        def capturing_print_msg(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
 
         client.print_msg = capturing_print_msg
         try:
@@ -338,8 +342,8 @@ class TestSourceAddressValidation:
         finally:
             client.print_msg = original_print_msg
 
-        assert 'real message' in received
-        assert 'injected' not in received
+        assert any('real message' in r for r in received)
+        assert not any('injected' in r for r in received)
         sock_a.close()
         sock_b.close()
         sock_c.close()
@@ -363,8 +367,8 @@ class TestEncryption:
         received = []
         original_print_msg = client.print_msg
 
-        def capturing_print_msg(msg):
-            received.append(msg)
+        def capturing_print_msg(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
 
         client.print_msg = capturing_print_msg
         try:
@@ -379,7 +383,7 @@ class TestEncryption:
         finally:
             client.print_msg = original_print_msg
 
-        assert 'secret text' in received
+        assert any('secret text' in r for r in received)
 
         sock_a.close()
         sock_b.close()
@@ -396,8 +400,8 @@ class TestEncryption:
         received = []
         original_print_msg = client.print_msg
 
-        def capturing_print_msg(msg):
-            received.append(msg)
+        def capturing_print_msg(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
 
         client.print_msg = capturing_print_msg
         try:
@@ -436,8 +440,8 @@ class TestEncryption:
         received = []
         original_print_msg = client.print_msg
 
-        def capturing_print_msg(msg):
-            received.append(msg)
+        def capturing_print_msg(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
 
         client.print_msg = capturing_print_msg
 
@@ -573,8 +577,8 @@ class TestDisconnect:
         received = []
         original_print_msg = client.print_msg
 
-        def capturing_print_msg(msg):
-            received.append(msg)
+        def capturing_print_msg(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
 
         client.print_msg = capturing_print_msg
         try:

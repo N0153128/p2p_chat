@@ -29,6 +29,21 @@ PUNCH_ACK_PREFIX   = b'__punch_ack__:'
 # After the Box is established all payloads are encrypted nacl boxes.
 # Control messages sent inside the encrypted channel:
 CTRL_DISCONNECT    = b'__disconnect__'
+# Metadata message sent once right after connect: __meta__:<colour_id>
+CTRL_META_PREFIX   = b'__meta__:'
+
+# Colour palette — readable on both dark and light terminal backgrounds.
+# Each entry: (display label, Fore colour code)
+COLOURS = [
+    ('white',   Fore.WHITE),
+    ('cyan',    Fore.CYAN),
+    ('magenta', Fore.MAGENTA),
+    ('yellow',  Fore.YELLOW),
+    ('green',   Fore.GREEN),
+    ('blue',    Fore.BLUE + Style.BRIGHT),
+    ('red',     Fore.RED + Style.BRIGHT),
+]
+COLOUR_NAMES = [c[0] for c in COLOURS]
 
 SESSION_ID         = '%08x' % random.randint(0, 0xFFFFFFFF)
 
@@ -90,10 +105,21 @@ def _beacon_hmac(room_code, session_id):
 print_lock = threading.Lock()
 
 
-def print_msg(msg):
+def _colour_for(name):
+    """Return the Fore code for a colour name, defaulting to white."""
+    for label, code in COLOURS:
+        if label == name:
+            return code
+    return Fore.WHITE
+
+
+def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
     with print_lock:
         sys.stdout.write(f'\r{" " * 80}\r')
-        print(Fore.LIGHTGREEN_EX + Style.BRIGHT + msg)
+        sys.stdout.write(
+            Style.BRIGHT + name_colour + username_part + Style.RESET_ALL +
+            text_colour + text_part + Style.RESET_ALL + '\n'
+        )
         sys.stdout.write('> ')
         sys.stdout.flush()
 
@@ -187,12 +213,15 @@ class UDPClient:
       dropped in _recv_loop, preventing control-message injection.
     """
 
-    def __init__(self, ip, sock, port):
+    def __init__(self, ip, sock, port, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
         self.sock = sock
         self.remote = (ip, port)
         self.connected = threading.Event()
         self.done = threading.Event()
         self.box = None                     # set once key exchange completes
+        self.name_colour = name_colour      # our name colour (sent to peer in meta)
+        self.text_colour = text_colour      # our text colour (applied locally to sent echo)
+        self.peer_name_colour = Fore.CYAN   # updated when peer's meta arrives
 
         # Ephemeral keypair for this session
         self._privkey = nacl.public.PrivateKey.generate()
@@ -316,12 +345,32 @@ class UDPClient:
                     pass
                 break
 
-            print_msg(plaintext.decode('utf-8', errors='replace'))
+            if plaintext.startswith(CTRL_META_PREFIX):
+                colour_name = plaintext[len(CTRL_META_PREFIX):].decode(errors='ignore').strip()
+                self.peer_name_colour = _colour_for(colour_name)
+                continue
+
+            text = plaintext.decode('utf-8', errors='replace')
+            # Split "<username>: message" so they can be styled independently.
+            # Falls back to rendering the whole string as body if format doesn't match.
+            if text.startswith('<') and '>: ' in text:
+                bracket_end = text.index('>: ')
+                name_part = text[:bracket_end + 1]   # e.g. "<Alice>"
+                body_part = text[bracket_end + 2:]   # e.g. ": hello"
+                print_msg(name_part, body_part, name_colour=self.peer_name_colour)
+            else:
+                print_msg('', text, name_colour=self.peer_name_colour)
 
     def _send_loop(self):
         self.connected.wait()
         try:
             if self.box:
+                # Send our colour preference so the peer knows how to render our name
+                colour_name = next(
+                    (n for n, c in COLOURS if c == self.name_colour), 'cyan')
+                self.sock.sendto(
+                    self.box.encrypt(CTRL_META_PREFIX + colour_name.encode()),
+                    self.remote)
                 self.sock.sendto(
                     self.box.encrypt(f'{username} connected'.encode()), self.remote)
         except Exception:
@@ -346,8 +395,27 @@ class UDPClient:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _pick_colour(prompt, default_name):
+    """Print a numbered colour menu and return the chosen Fore code."""
+    print(prompt)
+    for i, (name, code) in enumerate(COLOURS, 1):
+        print(f'  {Style.BRIGHT + code}{i}{Style.RESET_ALL}  {code}{name}{Style.RESET_ALL}')
+    while True:
+        raw = input(f'Choose (1-{len(COLOURS)}, default {default_name}): ').strip()
+        if not raw:
+            return _colour_for(default_name)
+        if raw.isdigit() and 1 <= int(raw) <= len(COLOURS):
+            return COLOURS[int(raw) - 1][1]
+        print(f'Enter a number between 1 and {len(COLOURS)}.')
+
+
 if __name__ == '__main__':
     username = input('Type your name: ')
+    print()
+    name_colour  = _pick_colour('Pick a colour for your name:', 'cyan')
+    print()
+    text_colour  = _pick_colour('Pick a colour for your message text:', 'white')
+    print()
 
     try:
         _s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -382,13 +450,15 @@ if __name__ == '__main__':
                 if peer_addr is None:
                     print(Fore.LIGHTRED_EX + Style.BRIGHT + 'No peer found on the local network.')
                     continue
-                UDPClient(peer_addr[0], _sock, port=peer_addr[1])
+                UDPClient(peer_addr[0], _sock, port=peer_addr[1],
+                          name_colour=name_colour, text_colour=text_colour)
             elif mode == 'g':
                 peer_ip = input('Peer\'s public IP: ').strip()
                 if not peer_ip:
                     continue
                 peer_port = int(input(f'Peer\'s port: ').strip())
-                UDPClient(peer_ip, _sock, port=peer_port)
+                UDPClient(peer_ip, _sock, port=peer_port,
+                          name_colour=name_colour, text_colour=text_colour)
             else:
                 print('Enter l or g.')
                 continue
