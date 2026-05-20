@@ -607,9 +607,13 @@ class UDPClient:
                 split_at = text.index('>: ')
                 name_part = text[:split_at + 1]   # includes the closing '>'
                 body_part = text[split_at + 2:]   # includes the leading ': '
-                print_msg(name_part, body_part, name_colour=self.peer_name_colour)
+                print_msg(
+                    name_part, body_part,
+                    name_colour=self.peer_name_colour,
+                    text_colour=self.text_colour,
+                )
             else:
-                print_msg('', text, name_colour=self.peer_name_colour)
+                print_msg('', text, name_colour=self.peer_name_colour, text_colour=self.text_colour)
 
     def _send_loop(self):
         """Read stdin and send encrypted chat messages to the peer.
