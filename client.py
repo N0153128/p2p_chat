@@ -200,27 +200,30 @@ class UDPClient:
 
         signal.signal(signal.SIGINT, self._handle_sigint)
 
-        if _is_local(ip):
-            # LAN — no NAT, but still do the key exchange via punch messages
-            punch_thread = threading.Thread(target=self._punch)
-            punch_thread.daemon = True
-            punch_thread.start()
-        else:
+        if not _is_local(ip):
             print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Punching through NAT...')
-            punch_thread = threading.Thread(target=self._punch)
-            punch_thread.daemon = True
-            punch_thread.start()
+
+        # Start recv_loop immediately so it can handle incoming PUNCH/PUNCH_ACK
+        # and set self.connected — otherwise the punch thread sends into a void.
+        recv_thread = threading.Thread(target=self._recv_loop)
+        recv_thread.daemon = True
+        recv_thread.start()
+
+        punch_thread = threading.Thread(target=self._punch)
+        punch_thread.daemon = True
+        punch_thread.start()
 
         if not self.connected.wait(timeout=PUNCH_TIMEOUT):
             print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
             print('Your peer may be behind Symmetric NAT, or started too late.')
+            self.done.set()
             return
 
         send_thread = threading.Thread(target=self._send_loop)
         send_thread.daemon = True
         send_thread.start()
 
-        self._recv_loop()
+        self.done.wait()
 
     def _handle_sigint(self, sig, frame):
         try:
@@ -256,6 +259,7 @@ class UDPClient:
             try:
                 data, addr = self.sock.recvfrom(65535)
             except OSError:
+                self.done.set()
                 break
 
             # Issue #3: drop packets from unexpected sources
