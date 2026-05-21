@@ -3,8 +3,13 @@ Terminal UI utilities: colour palette, greeting screen, thread-safe
 message printing, and the interactive colour picker shown at startup.
 """
 
+import math
+import os
 import shutil
+import struct
+import subprocess
 import sys
+import tempfile
 import threading
 
 import pyfiglet
@@ -142,6 +147,72 @@ def show_greeting():
 
 
 # ---------------------------------------------------------------------------
+# Alert sound
+# ---------------------------------------------------------------------------
+
+_beep_wav = None  # path to the generated WAV file, created on first use
+_beep_lock = threading.Lock()
+
+
+def _make_beep_wav():
+    """Write a short sine-wave beep to a temp WAV file and return its path."""
+    sample_rate = 44100
+    frequency = 880      # Hz — a clear, high-pitched ping
+    duration = 0.12      # seconds
+    volume = 0.4         # 0.0–1.0
+
+    n_samples = int(sample_rate * duration)
+    # Ramp amplitude up then down over 10 ms to avoid clicks.
+    ramp = int(sample_rate * 0.01)
+    samples = []
+    for i in range(n_samples):
+        t = i / sample_rate
+        amp = volume
+        if i < ramp:
+            amp *= i / ramp
+        elif i > n_samples - ramp:
+            amp *= (n_samples - i) / ramp
+        samples.append(int(amp * 32767 * math.sin(2 * math.pi * frequency * t)))
+
+    data = struct.pack(f'<{n_samples}h', *samples)
+    data_size = len(data)
+    header = struct.pack(
+        '<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 36 + data_size, b'WAVE',
+        b'fmt ', 16, 1, 1,        # PCM, mono
+        sample_rate, sample_rate * 2, 2, 16,  # byte rate, block align, bits
+        b'data', data_size,
+    )
+    fd, path = tempfile.mkstemp(suffix='.wav')
+    with os.fdopen(fd, 'wb') as f:
+        f.write(header + data)
+    return path
+
+
+def _play_beep():
+    """Play the alert beep in a background process (non-blocking)."""
+    global _beep_wav
+    with _beep_lock:
+        if _beep_wav is None:
+            try:
+                _beep_wav = _make_beep_wav()
+            except Exception:
+                _beep_wav = ''  # mark as failed so we don't retry every message
+    if not _beep_wav:
+        return
+    try:
+        # paplay is PulseAudio/PipeWire; aplay is ALSA fallback.
+        player = 'paplay' if shutil.which('paplay') else 'aplay'
+        subprocess.Popen(
+            [player, _beep_wav],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
 
@@ -162,13 +233,15 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
         alert:         If ``True``, emit a terminal bell character before the
                        message so the user is notified of an incoming message.
     """
+    if alert:
+        _play_beep()
     with print_lock:
         sys.stdout.write(f'\r{" " * 80}\r')
         sys.stdout.write(
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL + '\n'
         )
-        sys.stdout.write(('\a' if alert else '') + '> ')
+        sys.stdout.write('> ')
         sys.stdout.flush()
 
 
