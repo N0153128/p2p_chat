@@ -22,7 +22,7 @@ import discovery
 import stun
 from discovery import lan_discover
 from session import UDPClient
-from ui import pick_colour
+from ui import pick_colour, show_greeting
 
 
 def _get_local_ip():
@@ -57,6 +57,8 @@ def _prompt_with_default(prompt, default):
 
 
 if __name__ == '__main__':
+    show_greeting()
+
     prefs = config.load()
 
     # --- username ---
@@ -89,12 +91,26 @@ if __name__ == '__main__':
     chat_port = sock.getsockname()[1]
 
     ext_ip, _ = stun.get_external_address(sock)
-    print(f'Your public IP (internet): {ext_ip or "unavailable"}')
-    print(f'Your chat port:            {chat_port}')
-    print()
-    print('  l  — find a peer on this network automatically')
-    print('  g  — connect to a peer on the internet (enter their IP and port)')
-    print()
+
+    sys.stdout.write(
+        Fore.CYAN + Style.BRIGHT + '  public IP  ' + Style.RESET_ALL
+        + Fore.WHITE + Style.BRIGHT + (ext_ip or 'unavailable') + Style.RESET_ALL + '\n'
+    )
+    sys.stdout.write(
+        Fore.CYAN + Style.BRIGHT + '  chat port  ' + Style.RESET_ALL
+        + Fore.WHITE + Style.BRIGHT + str(chat_port) + Style.RESET_ALL + '\n'
+    )
+    sys.stdout.write('\n')
+    sys.stdout.write(
+        Fore.MAGENTA + Style.BRIGHT + '  l' + Style.RESET_ALL
+        + Fore.WHITE + '  —  find a peer on this network automatically\n' + Style.RESET_ALL
+    )
+    sys.stdout.write(
+        Fore.MAGENTA + Style.BRIGHT + '  g' + Style.RESET_ALL
+        + Fore.WHITE + '  —  connect to a peer on the internet\n' + Style.RESET_ALL
+    )
+    sys.stdout.write('\n')
+    sys.stdout.flush()
 
     while True:
         try:
