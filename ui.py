@@ -42,13 +42,13 @@ COLOUR_NAMES = [name for name, _ in COLOURS]
 print_lock = threading.Lock()
 """Mutex that serialises all terminal writes to prevent interleaved output."""
 
-# Gradient used to colour the ASCII-art title: cyan → magenta.
+# Gradient used to colour the ASCII-art title: green → red.
 _TITLE_GRADIENT = [
-    Fore.CYAN,
-    Fore.CYAN + Style.BRIGHT,
-    Fore.BLUE + Style.BRIGHT,
-    Fore.MAGENTA + Style.BRIGHT,
-    Fore.MAGENTA,
+    Fore.GREEN,
+    Fore.GREEN + Style.BRIGHT,
+    Fore.YELLOW + Style.BRIGHT,
+    Fore.RED + Style.BRIGHT,
+    Fore.RED,
 ]
 
 
@@ -111,7 +111,7 @@ def show_greeting():
 
     # --- top border ---
     sys.stdout.write('\n')
-    sys.stdout.write(Fore.CYAN + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
+    sys.stdout.write(Fore.GREEN + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
     sys.stdout.write('\n')
 
     # --- centred title ---
@@ -132,7 +132,7 @@ def show_greeting():
     # --- sub-rule ---
     sys.stdout.write('\n')
     sys.stdout.write(
-        Fore.MAGENTA + Style.BRIGHT + _centre(_rule(len(tagline) + 8, '·'), cols) + Style.RESET_ALL + '\n'
+        Fore.RED + Style.BRIGHT + _centre(_rule(len(tagline) + 8, '·'), cols) + Style.RESET_ALL + '\n'
     )
 
     # --- version / help hint ---
@@ -141,7 +141,7 @@ def show_greeting():
 
     # --- bottom border ---
     sys.stdout.write('\n')
-    sys.stdout.write(Fore.CYAN + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
+    sys.stdout.write(Fore.RED + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
     sys.stdout.write('\n')
     sys.stdout.flush()
 
