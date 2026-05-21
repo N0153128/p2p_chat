@@ -164,13 +164,11 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
     """
     with print_lock:
         sys.stdout.write(f'\r{" " * 80}\r')
-        if alert:
-            sys.stdout.write('\a')
         sys.stdout.write(
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL + '\n'
         )
-        sys.stdout.write('> ')
+        sys.stdout.write(('\a' if alert else '') + '> ')
         sys.stdout.flush()
 
 
