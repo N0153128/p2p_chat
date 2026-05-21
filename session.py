@@ -97,6 +97,7 @@ class UDPClient:
         self.text_colour = text_colour
         self.peer_name_colour = Fore.CYAN
         self.peer_text_colour = Fore.WHITE
+        self.peer_disconnected = False
 
         self._privkey = nacl.public.PrivateKey.generate()
         self._pubkey_bytes = bytes(self._privkey.public_key)
@@ -245,6 +246,7 @@ class UDPClient:
                     sys.stdout.write(f'\r{" " * 80}\r')
                     print(Fore.LIGHTYELLOW_EX + Style.BRIGHT + 'Peer disconnected.')
                     sys.stdout.flush()
+                self.peer_disconnected = True
                 self.done.set()
                 try:
                     # Unblock the stdin readline() in _send_loop.
