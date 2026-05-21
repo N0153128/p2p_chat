@@ -170,6 +170,7 @@ class UDPClient:
                 'connected': threading.Event(),
                 'name_colour': Fore.CYAN,
                 'text_colour': Fore.WHITE,
+                'muted': False,
             }
         t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
         t.start()
@@ -455,6 +456,7 @@ class UDPClient:
                 peer = self._peers.get(addr, {})
             name_colour = peer.get('name_colour', Fore.CYAN)
             text_colour = peer.get('text_colour', Fore.WHITE)
+            muted = peer.get('muted', False)
 
             text = plaintext.decode('utf-8', errors='replace')
             if text.startswith('<') and '>: ' in text:
@@ -462,15 +464,72 @@ class UDPClient:
                 name_part = text[:split_at + 1]
                 body_part = text[split_at + 2:]
                 ui.print_msg(name_part, body_part,
-                             name_colour=name_colour, text_colour=text_colour, alert=True)
+                             name_colour=name_colour, text_colour=text_colour, alert=not muted)
             else:
                 ui.print_msg('', text,
-                             name_colour=name_colour, text_colour=text_colour, alert=True)
+                             name_colour=name_colour, text_colour=text_colour, alert=not muted)
 
         try:
             self.sock.settimeout(None)
         except OSError:
             pass
+
+    def _handle_mute(self):
+        """Show a numbered peer list and toggle the mute flag for the chosen peer."""
+        with self._peers_lock:
+            connected = [
+                (addr, p)
+                for addr, p in self._peers.items()
+                if p['connected'].is_set()
+            ]
+        if not connected:
+            with print_lock:
+                sys.stdout.write(f'\r{" " * 80}\r')
+                sys.stdout.write(Fore.YELLOW + '  No peers connected.\n' + Style.RESET_ALL)
+                sys.stdout.flush()
+            return
+
+        with print_lock:
+            sys.stdout.write(f'\r{" " * 80}\r')
+            sys.stdout.write(Style.BRIGHT + Fore.WHITE + '  Peers:\n' + Style.RESET_ALL)
+            for i, (addr, p) in enumerate(connected, 1):
+                mute_tag = Fore.RED + ' [muted]' + Style.RESET_ALL if p['muted'] else ''
+                sys.stdout.write(
+                    f'  {Style.BRIGHT}{Fore.MAGENTA}{i}{Style.RESET_ALL}'
+                    f'  {addr[0]}:{addr[1]}{mute_tag}\n'
+                )
+            sys.stdout.write(
+                Fore.WHITE + f'  Toggle mute (1-{len(connected)}, or Enter to cancel): '
+                + Style.RESET_ALL
+            )
+            sys.stdout.flush()
+
+        raw = sys.stdin.readline().rstrip('\n').strip()
+        lines_written = len(connected) + 2  # header + peer rows + input row
+
+        # Erase the menu.
+        with print_lock:
+            for _ in range(lines_written):
+                sys.stdout.write('\x1b[1A\x1b[2K')
+            sys.stdout.flush()
+
+        if not raw or not raw.isdigit() or not (1 <= int(raw) <= len(connected)):
+            return
+
+        addr, peer = connected[int(raw) - 1]
+        with self._peers_lock:
+            if addr in self._peers:
+                self._peers[addr]['muted'] = not self._peers[addr]['muted']
+                now_muted = self._peers[addr]['muted']
+
+        action = 'Muted' if now_muted else 'Unmuted'
+        with print_lock:
+            sys.stdout.write(f'\r{" " * 80}\r')
+            sys.stdout.write(
+                Fore.YELLOW + Style.BRIGHT
+                + f'  {action} {addr[0]}:{addr[1]}\n' + Style.RESET_ALL
+            )
+            sys.stdout.flush()
 
     def _send_loop(self):
         """Read stdin and broadcast encrypted messages to all connected peers."""
@@ -493,6 +552,9 @@ class UDPClient:
                         sys.stdout.flush()
                     self.done.set()
                     break
+                if msg == '/mute':
+                    self._handle_mute()
+                    continue
                 if msg:
                     self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))
                     ui.print_msg(
