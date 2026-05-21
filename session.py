@@ -474,61 +474,15 @@ class UDPClient:
         except OSError:
             pass
 
-    def _handle_mute(self):
-        """Show a numbered peer list and toggle the mute flag for the chosen peer."""
+    def _set_all_muted(self, muted):
+        """Set the mute flag on every peer and print a confirmation."""
         with self._peers_lock:
-            connected = [
-                (addr, p)
-                for addr, p in self._peers.items()
-                if p['connected'].is_set()
-            ]
-        if not connected:
-            with print_lock:
-                sys.stdout.write(f'\r{" " * 80}\r')
-                sys.stdout.write(Fore.YELLOW + '  No peers connected.\n' + Style.RESET_ALL)
-                sys.stdout.flush()
-            return
-
+            for p in self._peers.values():
+                p['muted'] = muted
+        action = 'Notifications muted.' if muted else 'Notifications unmuted.'
         with print_lock:
             sys.stdout.write(f'\r{" " * 80}\r')
-            sys.stdout.write(Style.BRIGHT + Fore.WHITE + '  Peers:\n' + Style.RESET_ALL)
-            for i, (addr, p) in enumerate(connected, 1):
-                mute_tag = Fore.RED + ' [muted]' + Style.RESET_ALL if p['muted'] else ''
-                sys.stdout.write(
-                    f'  {Style.BRIGHT}{Fore.MAGENTA}{i}{Style.RESET_ALL}'
-                    f'  {addr[0]}:{addr[1]}{mute_tag}\n'
-                )
-            sys.stdout.write(
-                Fore.WHITE + f'  Toggle mute (1-{len(connected)}, or Enter to cancel): '
-                + Style.RESET_ALL
-            )
-            sys.stdout.flush()
-
-        raw = sys.stdin.readline().rstrip('\n').strip()
-        lines_written = len(connected) + 2  # header + peer rows + input row
-
-        # Erase the menu.
-        with print_lock:
-            for _ in range(lines_written):
-                sys.stdout.write('\x1b[1A\x1b[2K')
-            sys.stdout.flush()
-
-        if not raw or not raw.isdigit() or not (1 <= int(raw) <= len(connected)):
-            return
-
-        addr, peer = connected[int(raw) - 1]
-        with self._peers_lock:
-            if addr in self._peers:
-                self._peers[addr]['muted'] = not self._peers[addr]['muted']
-                now_muted = self._peers[addr]['muted']
-
-        action = 'Muted' if now_muted else 'Unmuted'
-        with print_lock:
-            sys.stdout.write(f'\r{" " * 80}\r')
-            sys.stdout.write(
-                Fore.YELLOW + Style.BRIGHT
-                + f'  {action} {addr[0]}:{addr[1]}\n' + Style.RESET_ALL
-            )
+            sys.stdout.write(Fore.YELLOW + Style.BRIGHT + action + '\n' + Style.RESET_ALL)
             sys.stdout.flush()
 
     def _send_loop(self):
@@ -553,7 +507,10 @@ class UDPClient:
                     self.done.set()
                     break
                 if msg == '/mute':
-                    self._handle_mute()
+                    self._set_all_muted(True)
+                    continue
+                if msg == '/unmute':
+                    self._set_all_muted(False)
                     continue
                 if msg:
                     self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))
