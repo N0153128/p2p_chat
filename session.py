@@ -101,7 +101,7 @@ class UDPClient:
         self._privkey = nacl.public.PrivateKey.generate()
         self._pubkey_bytes = bytes(self._privkey.public_key)
 
-        signal.signal(signal.SIGINT, self._handle_sigint)
+        self._prev_sigint = signal.signal(signal.SIGINT, self._handle_sigint)
 
         if not discovery.is_local(ip):
             print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Punching through NAT...')
@@ -125,6 +125,7 @@ class UDPClient:
         send_thread.start()
 
         self.done.wait()
+        signal.signal(signal.SIGINT, self._prev_sigint)
 
     # ------------------------------------------------------------------
     # Signal handling
@@ -313,6 +314,23 @@ class UDPClient:
                     sys.stdout.flush()
                 msg = sys.stdin.readline().rstrip('\n')
                 if self.done.is_set():
+                    break
+                if msg == '/exit':
+                    if self.box:
+                        try:
+                            self.sock.sendto(
+                                self.box.encrypt(CTRL_DISCONNECT), self.remote
+                            )
+                        except Exception:
+                            pass
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(
+                            Fore.LIGHTYELLOW_EX + Style.BRIGHT
+                            + 'Left the room.\n' + Style.RESET_ALL
+                        )
+                        sys.stdout.flush()
+                    self.done.set()
                     break
                 if msg and self.box:
                     self.sock.sendto(
