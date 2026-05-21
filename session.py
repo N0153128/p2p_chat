@@ -187,12 +187,15 @@ class UDPClient:
         Runs in a daemon thread from the moment ``__init__`` starts.
         Dispatches each packet to the appropriate handler based on its
         prefix, then decrypts and displays chat messages once the Box is
-        established.  Sets ``done`` and returns when the peer disconnects
-        or the socket is closed.
+        established.  Sets ``done`` and returns when the peer disconnects,
+        the socket is closed, or ``done`` is set externally (e.g. /exit).
         """
-        while True:
+        self.sock.settimeout(0.5)
+        while not self.done.is_set():
             try:
                 data, addr = self.sock.recvfrom(65535)
+            except TimeoutError:
+                continue
             except OSError:
                 self.done.set()
                 break
@@ -278,6 +281,10 @@ class UDPClient:
                     name_colour=self.peer_name_colour,
                     text_colour=self.peer_text_colour,
                 )
+        try:
+            self.sock.settimeout(None)
+        except OSError:
+            pass
 
     def _send_loop(self):
         """Read stdin and send encrypted chat messages to the peer.
