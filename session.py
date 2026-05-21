@@ -1,9 +1,37 @@
 """
 Encrypted peer-to-peer UDP chat session.
 
-:class:`UDPClient` manages the full lifecycle of a single chat session:
-key exchange via the hole-punch handshake, encrypted messaging, colour
-metadata exchange, and clean disconnect.
+:class:`UDPClient` manages a multi-peer chat room session.  Up to
+:data:`~protocol.MAX_PEERS` peers can share the same room simultaneously.
+Each peer gets its own X25519 key-exchange and ``nacl.public.Box``; outgoing
+messages are encrypted and sent to every connected peer individually.
+
+Lifecycle
+---------
+1. An ephemeral X25519 keypair is generated (shared across all peers).
+2. ``_recv_loop`` starts immediately in a daemon thread.
+3. For each peer address supplied, a ``_punch`` thread is started.
+4. ``_recv_loop`` processes incoming packets from any known peer address:
+
+   - **PUNCH** — builds the per-peer ``Box``, replies with PUNCH_ACK + our
+     public key, marks that peer connected.
+   - **PUNCH_ACK** — builds the per-peer ``Box``, marks that peer connected.
+   - **Encrypted payload** — tries all connected peers' boxes; handles
+     CTRL_DISCONNECT, CTRL_META_PREFIX, and chat text.
+
+5. ``__init__`` blocks on ``done.wait()`` so the caller returns only after
+   the session ends (all peers left, /exit, or SIGINT).
+
+Encryption
+----------
+All post-handshake payloads use ``nacl.public.Box`` (X25519 key agreement,
+XSalsa20-Poly1305 AEAD).  Packets that fail authentication against every
+known peer box are dropped silently.
+
+Source validation
+-----------------
+``_recv_loop`` only processes packets whose source address appears in the
+set of known peer addresses, preventing injection from third parties.
 """
 
 import os
@@ -20,6 +48,7 @@ from protocol import (
     BEACON_PREFIX,
     CTRL_DISCONNECT,
     CTRL_META_PREFIX,
+    MAX_PEERS,
     PUNCH_ACK_PREFIX,
     PUNCH_INTERVAL,
     PUNCH_PREFIX,
@@ -30,97 +59,69 @@ from ui import COLOURS, colour_for, print_lock
 
 
 class UDPClient:
-    """Encrypted, authenticated peer-to-peer UDP chat session.
-
-    Lifecycle
-    ---------
-    1. An ephemeral X25519 keypair is generated.
-    2. ``_recv_loop`` and ``_punch`` start immediately in daemon threads.
-    3. ``_punch`` sends :data:`~protocol.PUNCH_PREFIX` packets carrying our
-       public key until ``connected`` is set or
-       :data:`~protocol.PUNCH_TIMEOUT` expires.
-    4. ``_recv_loop`` processes incoming packets:
-
-       - **PUNCH** — builds the shared ``nacl.public.Box``, replies with
-         :data:`~protocol.PUNCH_ACK_PREFIX` + our public key, sets
-         ``connected``.
-       - **PUNCH_ACK** — builds the shared ``Box``, sets ``connected``.
-       - **Encrypted payload** — decrypts with the ``Box``; handles
-         :data:`~protocol.CTRL_DISCONNECT`,
-         :data:`~protocol.CTRL_META_PREFIX`, and chat text.
-
-    5. Once ``connected`` is set, ``_send_loop`` starts: it sends our
-       colour metadata, announces our arrival, then reads ``stdin`` in a
-       loop, encrypting and sending each line.
-    6. ``__init__`` blocks on ``done.wait()`` so the caller returns only
-       after the session ends (peer disconnect, timeout, or SIGINT).
-
-    Encryption
-    ----------
-    All post-handshake payloads use ``nacl.public.Box`` (X25519 key
-    agreement, XSalsa20-Poly1305 AEAD).  Packets that fail authentication
-    are dropped silently.
-
-    Source validation
-    -----------------
-    ``_recv_loop`` drops any datagram whose source address differs from
-    ``self.remote``, preventing injection of control messages from third
-    parties.
+    """Encrypted multi-peer UDP chat room session.
 
     Args:
-        ip:           Peer's IP address string.
-        sock:         Bound ``SOCK_DGRAM`` socket to use for all I/O.
-        port:         Peer's UDP port.
+        peers:        List of ``(ip, port)`` tuples to connect to.
+        sock:         Bound ``SOCK_DGRAM`` socket used for all I/O.
         username:     Local user's display name.
-        name_colour:  ANSI code for our username colour (sent to peer via
-                      :data:`~protocol.CTRL_META_PREFIX`).
-        text_colour:  ANSI code for our message body colour (applied
-                      locally to received message bodies).
+        name_colour:  ANSI code for our username colour.
+        text_colour:  ANSI code for our message body colour.
     """
 
-    def __init__(
-        self,
-        ip,
-        sock,
-        port,
-        username,
-        name_colour=Fore.CYAN,
-        text_colour=Fore.WHITE,
-    ):
+    def __init__(self, peers, sock, username, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
         self.sock = sock
-        self.remote = (ip, port)
         self.username = username
-        self.connected = threading.Event()
-        self.done = threading.Event()
-        self.box = None
         self.name_colour = name_colour
         self.text_colour = text_colour
-        self.peer_name_colour = Fore.CYAN
-        self.peer_text_colour = Fore.WHITE
+
+        # done is set when the local user exits or all peers have disconnected.
+        self.done = threading.Event()
+        # Set to True when at least one peer disconnected (vs. local /exit).
         self.peer_disconnected = False
 
         self._privkey = nacl.public.PrivateKey.generate()
         self._pubkey_bytes = bytes(self._privkey.public_key)
 
+        # Per-peer state, keyed by (ip, port).
+        # Each entry: {'box': Box|None, 'connected': Event,
+        #              'name_colour': str, 'text_colour': str}
+        self._peers_lock = threading.Lock()
+        self._peers = {
+            addr: {
+                'box': None,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            }
+            for addr in peers
+        }
+
         self._prev_sigint = signal.signal(signal.SIGINT, self._handle_sigint)
 
-        if not discovery.is_local(ip):
-            print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Punching through NAT...')
-
-        # _recv_loop must start before _punch so it can process the peer's
-        # PUNCH/PUNCH_ACK and set self.connected; without it _punch would
-        # send into a void and the connection would always time out.
         recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         recv_thread.start()
 
-        punch_thread = threading.Thread(target=self._punch, daemon=True)
-        punch_thread.start()
+        for addr in peers:
+            t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
+            t.start()
 
-        if not self.connected.wait(timeout=PUNCH_TIMEOUT):
-            print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
-            print('Your peer may be behind Symmetric NAT, or started too late.')
-            self.done.set()
-            return
+        # Wait until at least one peer connects (or all time out).
+        deadline = time() + PUNCH_TIMEOUT
+        while time() < deadline and not self.done.is_set():
+            with self._peers_lock:
+                if any(p['connected'].is_set() for p in self._peers.values()):
+                    break
+            sleep(0.1)
+        else:
+            with self._peers_lock:
+                connected = [a for a, p in self._peers.items() if p['connected'].is_set()]
+            if not connected:
+                print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
+                print('Your peer may be behind Symmetric NAT, or started too late.')
+                self.done.set()
+                signal.signal(signal.SIGINT, self._prev_sigint)
+                return
 
         send_thread = threading.Thread(target=self._send_loop, daemon=True)
         send_thread.start()
@@ -133,12 +134,8 @@ class UDPClient:
     # ------------------------------------------------------------------
 
     def _handle_sigint(self, sig, frame):
-        """Send a disconnect notification to the peer and exit cleanly."""
-        try:
-            if self.box:
-                self.sock.sendto(self.box.encrypt(CTRL_DISCONNECT), self.remote)
-        except Exception:
-            pass
+        """Send disconnect to all peers and exit."""
+        self._broadcast(CTRL_DISCONNECT)
         print()
         self.done.set()
         sys.exit(0)
@@ -148,49 +145,57 @@ class UDPClient:
     # ------------------------------------------------------------------
 
     def _make_punch_msg(self):
-        """Return a PUNCH packet containing our hex-encoded public key."""
         return PUNCH_PREFIX + self._pubkey_bytes.hex().encode()
 
     def _make_punch_ack(self):
-        """Return a PUNCH_ACK packet containing our hex-encoded public key."""
         return PUNCH_ACK_PREFIX + self._pubkey_bytes.hex().encode()
 
-    def _build_box(self, peer_pubkey_hex):
-        """Construct the shared ``nacl.public.Box`` from the peer's public key.
-
-        Args:
-            peer_pubkey_hex: 64-character hex string of the peer's X25519
-                             public key.
-
-        Raises:
-            Exception: Propagated from ``nacl`` if the key is malformed.
-        """
+    def _build_box(self, addr, peer_pubkey_hex):
+        """Construct the Box for *addr* from the peer's public key hex."""
         peer_pub = nacl.public.PublicKey(bytes.fromhex(peer_pubkey_hex))
-        self.box = nacl.public.Box(self._privkey, peer_pub)
+        box = nacl.public.Box(self._privkey, peer_pub)
+        with self._peers_lock:
+            if addr in self._peers:
+                self._peers[addr]['box'] = box
+
+    # ------------------------------------------------------------------
+    # Broadcast helper
+    # ------------------------------------------------------------------
+
+    def _broadcast(self, plaintext):
+        """Encrypt *plaintext* and send it to every connected peer."""
+        with self._peers_lock:
+            targets = [
+                (addr, p['box'])
+                for addr, p in self._peers.items()
+                if p['box'] is not None and p['connected'].is_set()
+            ]
+        for addr, box in targets:
+            try:
+                self.sock.sendto(box.encrypt(plaintext), addr)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Networking threads
     # ------------------------------------------------------------------
 
-    def _punch(self):
-        """Repeatedly send PUNCH packets until connected or timed out."""
+    def _punch(self, addr):
+        """Repeatedly send PUNCH packets to *addr* until connected or timed out."""
         deadline = time() + PUNCH_TIMEOUT
-        while not self.connected.is_set() and time() < deadline:
+        with self._peers_lock:
+            peer = self._peers.get(addr)
+        if peer is None:
+            return
+        while not peer['connected'].is_set() and not self.done.is_set() and time() < deadline:
             try:
-                self.sock.sendto(self._make_punch_msg(), self.remote)
+                self.sock.sendto(self._make_punch_msg(), addr)
             except Exception:
                 pass
             sleep(PUNCH_INTERVAL)
 
     def _recv_loop(self):
-        """Receive and dispatch all incoming UDP packets for this session.
-
-        Runs in a daemon thread from the moment ``__init__`` starts.
-        Dispatches each packet to the appropriate handler based on its
-        prefix, then decrypts and displays chat messages once the Box is
-        established.  Sets ``done`` and returns when the peer disconnects,
-        the socket is closed, or ``done`` is set externally (e.g. /exit).
-        """
+        """Receive and dispatch all incoming UDP packets for this session."""
         self.sock.settimeout(0.5)
         while not self.done.is_set():
             try:
@@ -201,122 +206,134 @@ class UDPClient:
                 self.done.set()
                 break
 
-            if addr != self.remote:
-                continue  # drop packets from unexpected sources
+            with self._peers_lock:
+                known = addr in self._peers
+
+            if not known:
+                continue  # drop packets from unknown sources
 
             if data.startswith(BEACON_PREFIX):
-                continue  # stray LAN discovery beacon, ignore
+                continue
 
             if data.startswith(PUNCH_PREFIX):
                 peer_pubkey_hex = data[len(PUNCH_PREFIX):].decode(errors='ignore')
                 try:
-                    self._build_box(peer_pubkey_hex)
+                    self._build_box(addr, peer_pubkey_hex)
                 except Exception:
                     continue
                 try:
-                    self.sock.sendto(self._make_punch_ack(), self.remote)
+                    self.sock.sendto(self._make_punch_ack(), addr)
                 except Exception:
                     pass
-                if not self.connected.is_set():
-                    self.connected.set()
-                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected! (encrypted)')
+                with self._peers_lock:
+                    peer = self._peers.get(addr)
+                if peer and not peer['connected'].is_set():
+                    peer['connected'].set()
+                    with print_lock:
+                        sys.stdout.write(
+                            f'\r{" " * 80}\r'
+                            + Fore.LIGHTGREEN_EX + Style.BRIGHT
+                            + f'Connected to {addr[0]}:{addr[1]}! (encrypted)\n'
+                            + Style.RESET_ALL
+                        )
+                        sys.stdout.flush()
                 continue
 
             if data.startswith(PUNCH_ACK_PREFIX):
                 peer_pubkey_hex = data[len(PUNCH_ACK_PREFIX):].decode(errors='ignore')
                 try:
-                    self._build_box(peer_pubkey_hex)
+                    self._build_box(addr, peer_pubkey_hex)
                 except Exception:
                     continue
-                if not self.connected.is_set():
-                    self.connected.set()
-                    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Connected! (encrypted)')
+                with self._peers_lock:
+                    peer = self._peers.get(addr)
+                if peer and not peer['connected'].is_set():
+                    peer['connected'].set()
+                    with print_lock:
+                        sys.stdout.write(
+                            f'\r{" " * 80}\r'
+                            + Fore.LIGHTGREEN_EX + Style.BRIGHT
+                            + f'Connected to {addr[0]}:{addr[1]}! (encrypted)\n'
+                            + Style.RESET_ALL
+                        )
+                        sys.stdout.flush()
                 continue
 
-            if self.box is None:
-                continue  # key exchange not yet complete, discard
+            # Try to decrypt with this peer's box.
+            with self._peers_lock:
+                peer = self._peers.get(addr)
+            if peer is None or peer['box'] is None:
+                continue
 
             try:
-                plaintext = self.box.decrypt(data)
+                plaintext = peer['box'].decrypt(data)
             except Exception:
-                continue  # authentication failed, drop silently
+                continue
 
             if plaintext == CTRL_DISCONNECT:
+                with self._peers_lock:
+                    self._peers.pop(addr, None)
+                    remaining = len(self._peers)
                 with print_lock:
                     sys.stdout.write(f'\r{" " * 80}\r')
-                    print(Fore.LIGHTYELLOW_EX + Style.BRIGHT + 'Peer disconnected.')
+                    sys.stdout.write(
+                        Fore.LIGHTYELLOW_EX + Style.BRIGHT
+                        + f'{addr[0]}:{addr[1]} disconnected.'
+                        + (f'  ({remaining} peer{"s" if remaining != 1 else ""} remaining)'
+                           if remaining else '')
+                        + '\n' + Style.RESET_ALL
+                    )
                     sys.stdout.flush()
                 self.peer_disconnected = True
-                self.done.set()
-                try:
-                    # Unblock the stdin readline() in _send_loop.
-                    os.write(sys.stdin.fileno(), b'\n')
-                except Exception:
-                    pass
-                break
+                if remaining == 0:
+                    self.done.set()
+                    try:
+                        os.write(sys.stdin.fileno(), b'\n')
+                    except Exception:
+                        pass
+                    break
+                continue
 
             if plaintext.startswith(CTRL_META_PREFIX):
                 parts = plaintext[len(CTRL_META_PREFIX):].decode(
                     errors='ignore'
                 ).strip().split(',')
-                self.peer_name_colour = colour_for(parts[0])
-                if len(parts) >= 2:
-                    self.peer_text_colour = colour_for(parts[1])
+                with self._peers_lock:
+                    if addr in self._peers:
+                        self._peers[addr]['name_colour'] = colour_for(parts[0])
+                        if len(parts) >= 2:
+                            self._peers[addr]['text_colour'] = colour_for(parts[1])
                 continue
 
+            with self._peers_lock:
+                peer = self._peers.get(addr, {})
+            name_colour = peer.get('name_colour', Fore.CYAN)
+            text_colour = peer.get('text_colour', Fore.WHITE)
+
             text = plaintext.decode('utf-8', errors='replace')
-            # Split "<Name>: body" so username and body can be coloured
-            # independently.  Falls back to rendering the whole string as
-            # body text if the expected format is not present.
             if text.startswith('<') and '>: ' in text:
                 split_at = text.index('>: ')
-                name_part = text[:split_at + 1]   # includes the closing '>'
-                body_part = text[split_at + 2:]   # includes the leading ': '
-                ui.print_msg(
-                    name_part, body_part,
-                    name_colour=self.peer_name_colour,
-                    text_colour=self.peer_text_colour,
-                    alert=True,
-                )
+                name_part = text[:split_at + 1]
+                body_part = text[split_at + 2:]
+                ui.print_msg(name_part, body_part,
+                             name_colour=name_colour, text_colour=text_colour, alert=True)
             else:
-                ui.print_msg(
-                    '', text,
-                    name_colour=self.peer_name_colour,
-                    text_colour=self.peer_text_colour,
-                    alert=True,
-                )
+                ui.print_msg('', text,
+                             name_colour=name_colour, text_colour=text_colour, alert=True)
+
         try:
             self.sock.settimeout(None)
         except OSError:
             pass
 
     def _send_loop(self):
-        """Read stdin and send encrypted chat messages to the peer.
-
-        Waits for ``connected`` before doing anything.  Sends the colour
-        metadata message and a join announcement first, then enters the
-        interactive read loop.  Returns when ``done`` is set or stdin closes.
-        """
-        self.connected.wait()
-        try:
-            if self.box:
-                name_colour_name = next(
-                    (n for n, c in COLOURS if c == self.name_colour), 'cyan'
-                )
-                text_colour_name = next(
-                    (n for n, c in COLOURS if c == self.text_colour), 'white'
-                )
-                meta = f'{name_colour_name},{text_colour_name}'.encode()
-                self.sock.sendto(
-                    self.box.encrypt(CTRL_META_PREFIX + meta),
-                    self.remote,
-                )
-                self.sock.sendto(
-                    self.box.encrypt(f'{self.username} connected'.encode()),
-                    self.remote,
-                )
-        except Exception:
-            pass
+        """Read stdin and broadcast encrypted messages to all connected peers."""
+        # Send our colour metadata and join announcement to all peers.
+        name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
+        text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
+        meta = f'{name_colour_name},{text_colour_name}'.encode()
+        self._broadcast(CTRL_META_PREFIX + meta)
+        self._broadcast(f'{self.username} joined'.encode())
 
         try:
             while not self.done.is_set():
@@ -327,13 +344,7 @@ class UDPClient:
                 if self.done.is_set():
                     break
                 if msg == '/exit':
-                    if self.box:
-                        try:
-                            self.sock.sendto(
-                                self.box.encrypt(CTRL_DISCONNECT), self.remote
-                            )
-                        except Exception:
-                            pass
+                    self._broadcast(CTRL_DISCONNECT)
                     with print_lock:
                         sys.stdout.write(f'\r{" " * 80}\r')
                         sys.stdout.write(
@@ -343,13 +354,8 @@ class UDPClient:
                         sys.stdout.flush()
                     self.done.set()
                     break
-                if msg and self.box:
-                    self.sock.sendto(
-                        self.box.encrypt(
-                            f'<{self.username}>: {msg}'.encode('utf-8')
-                        ),
-                        self.remote,
-                    )
+                if msg:
+                    self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))
                     ui.print_msg(
                         f'(you) <{self.username}>',
                         f': {msg}',

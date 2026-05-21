@@ -24,6 +24,9 @@ PUNCH_INTERVAL = 0.5
 PUNCH_TIMEOUT = 30
 """Seconds to keep punching before declaring the connection attempt failed."""
 
+MAX_PEERS = 16
+"""Maximum number of peers allowed in a single chat room."""
+
 
 # ---------------------------------------------------------------------------
 # Pre-handshake message prefixes (unencrypted)

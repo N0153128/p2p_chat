@@ -119,20 +119,19 @@ if __name__ == '__main__':
                     print('Room code cannot be empty.')
                     continue
                 while True:
-                    peer_addr = lan_discover(chat_port, room_code)
-                    if peer_addr is None:
-                        print(Fore.LIGHTRED_EX + Style.BRIGHT + 'No peer found on the local network.')
+                    peers = lan_discover(chat_port, room_code)
+                    if not peers:
+                        print(Fore.LIGHTRED_EX + Style.BRIGHT + 'No peers found on the local network.')
                         break
                     session = UDPClient(
-                        peer_addr[0], sock,
-                        port=peer_addr[1],
+                        peers, sock,
                         username=username,
                         name_colour=name_colour,
                         text_colour=text_colour,
                     )
                     if not session.peer_disconnected:
                         break
-                    # Peer left — stay in the room and wait for a new connection.
+                    # At least one peer left — wait for new connections.
                     print(Fore.CYAN + Style.BRIGHT + 'Waiting for a new peer to join...' + Style.RESET_ALL)
             elif mode == 'g':
                 peer_ip = input("Peer's public IP: ").strip()
@@ -140,8 +139,7 @@ if __name__ == '__main__':
                     continue
                 peer_port = int(input("Peer's port: ").strip())
                 UDPClient(
-                    peer_ip, sock,
-                    port=peer_port,
+                    [(peer_ip, peer_port)], sock,
                     username=username,
                     name_colour=name_colour,
                     text_colour=text_colour,

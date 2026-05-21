@@ -52,23 +52,34 @@ def make_box_pair():
     return box_a, box_b
 
 
-def make_client_obj(sock, remote_addr=('127.0.0.1', 9999)):
-    """Construct a UDPClient bypassing __init__, wiring up attributes manually."""
+def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
+    """Construct a UDPClient bypassing __init__, wiring up attributes manually.
+
+    Sets up a single peer at *remote_addr* with an optional pre-built *box*.
+    """
     from colorama import Fore
     c = UDPClient.__new__(UDPClient)
     c.sock = sock
-    c.remote = remote_addr
     c.username = 'Tester'
-    c.connected = threading.Event()
     c.done = threading.Event()
-    c.box = None
+    c.peer_disconnected = False
     c.name_colour = Fore.CYAN
     c.text_colour = Fore.WHITE
-    c.peer_name_colour = Fore.CYAN
-    c.peer_text_colour = Fore.WHITE
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
+    c._peers_lock = threading.Lock()
+    connected_event = threading.Event()
+    if box is not None:
+        connected_event.set()
+    c._peers = {
+        remote_addr: {
+            'box': box,
+            'connected': connected_event,
+            'name_colour': Fore.CYAN,
+            'text_colour': Fore.WHITE,
+        }
+    }
     return c
 
 
@@ -284,12 +295,16 @@ class TestUDPClientKeyExchange:
         peer_pub_hex = bytes(priv_peer.public_key).hex()
 
         sock = make_udp_sock()
-        c = make_client_obj(sock)
-        c._build_box(peer_pub_hex)
-        assert c.box is not None
+        remote = ('127.0.0.1', 9999)
+        c = make_client_obj(sock, remote_addr=remote)
+        c._build_box(remote, peer_pub_hex)
+
+        with c._peers_lock:
+            box = c._peers[remote]['box']
+        assert box is not None
 
         box_peer = nacl.public.Box(priv_peer, c._privkey.public_key)
-        ciphertext = c.box.encrypt(b'hello')
+        ciphertext = box.encrypt(b'hello')
         plaintext = box_peer.decrypt(ciphertext)
         assert plaintext == b'hello'
         sock.close()
@@ -297,9 +312,10 @@ class TestUDPClientKeyExchange:
     def test_build_box_invalid_hex_raises(self):
         """_build_box raises an exception on bad pubkey hex."""
         sock = make_udp_sock()
-        c = make_client_obj(sock)
+        remote = ('127.0.0.1', 9999)
+        c = make_client_obj(sock, remote_addr=remote)
         with pytest.raises(Exception):
-            c._build_box('not-valid-hex')
+            c._build_box(remote, 'not-valid-hex')
         sock.close()
 
 
@@ -310,14 +326,13 @@ class TestUDPClientKeyExchange:
 class TestSourceAddressValidation:
 
     def test_packets_from_wrong_source_are_dropped(self):
-        """_recv_loop ignores packets that do not originate from self.remote."""
+        """_recv_loop ignores packets that do not originate from a known peer."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
         sock_c = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
         box_b, box_a = make_box_pair()
-        c.box = box_a
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=box_a)
 
         received = []
         original = ui.print_msg
@@ -357,9 +372,8 @@ class TestEncryption:
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
         box_b, box_a = make_box_pair()
-        c.box = box_a
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=box_a)
 
         received = []
         original = ui.print_msg
@@ -388,9 +402,8 @@ class TestEncryption:
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
         _, box_a = make_box_pair()
-        c.box = box_a
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=box_a)
 
         received = []
         original = ui.print_msg
@@ -405,9 +418,12 @@ class TestEncryption:
             time.sleep(0.05)
             sock_b.sendto(b'not encrypted', addr_of(sock_a))
             time.sleep(0.1)
+            # Replace the box with a valid one and send disconnect to end the loop.
             priv_peer = nacl.public.PrivateKey.generate()
             box_legit_peer = nacl.public.Box(priv_peer, c._privkey.public_key)
-            c.box = nacl.public.Box(c._privkey, priv_peer.public_key)
+            new_box = nacl.public.Box(c._privkey, priv_peer.public_key)
+            with c._peers_lock:
+                c._peers[addr_of(sock_b)]['box'] = new_box
             sock_b.sendto(box_legit_peer.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
             t.join(timeout=3)
         finally:
@@ -422,7 +438,8 @@ class TestEncryption:
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
+        # box=None means no key exchange yet
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=None)
 
         received = []
         original = ui.print_msg
@@ -486,7 +503,9 @@ class TestPunchHandshakeInRecvLoop:
         t_helper.join(timeout=4)
         t_recv.join(timeout=2)
 
-        assert c.connected.is_set()
+        with c._peers_lock:
+            connected = c._peers[addr_of(sock_b)]['connected'].is_set()
+        assert connected
         assert any(r.startswith(protocol.PUNCH_ACK_PREFIX) for r in replies)
         sock_b.close()
 
@@ -513,7 +532,9 @@ class TestPunchHandshakeInRecvLoop:
         t_helper.join(timeout=3)
         t_recv.join(timeout=2)
 
-        assert c.connected.is_set()
+        with c._peers_lock:
+            connected = c._peers[addr_of(sock_b)]['connected'].is_set()
+        assert connected
         sock_b.close()
 
 
@@ -528,9 +549,8 @@ class TestDisconnect:
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
         box_b, box_a = make_box_pair()
-        c.box = box_a
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=box_a)
 
         old_stdout = sys.stdout
         sys.stdout = io.StringIO()
@@ -552,9 +572,8 @@ class TestDisconnect:
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
-        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b))
         box_b, box_a = make_box_pair()
-        c.box = box_a
+        c = make_client_obj(sock_a, remote_addr=addr_of(sock_b), box=box_a)
 
         received = []
         original = ui.print_msg
@@ -591,17 +610,149 @@ class TestPunchTimeout:
     def test_punch_stops_after_timeout(self):
         """_punch stops sending after PUNCH_TIMEOUT expires."""
         sock_a = make_udp_sock()
-        c = make_client_obj(sock_a, remote_addr=('127.0.0.1', 9999))
+        remote = ('127.0.0.1', 9999)
+        c = make_client_obj(sock_a, remote_addr=remote)
 
         original = protocol.PUNCH_TIMEOUT
         protocol.PUNCH_TIMEOUT = 1
         try:
             start = time.time()
-            c._punch()
+            c._punch(remote)
             elapsed = time.time() - start
         finally:
             protocol.PUNCH_TIMEOUT = original
 
+        with c._peers_lock:
+            connected = c._peers[remote]['connected'].is_set()
         assert elapsed >= 1
-        assert not c.connected.is_set()
+        assert not connected
         sock_a.close()
+
+
+# ---------------------------------------------------------------------------
+# UDPClient — multi-peer
+# ---------------------------------------------------------------------------
+
+class TestMultiPeer:
+
+    def test_messages_received_from_two_peers(self):
+        """Messages from two separate peers are both displayed."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        sock_c = make_udp_sock()
+
+        box_b, box_a_b = make_box_pair()
+        box_c, box_a_c = make_box_pair()
+
+        from colorama import Fore
+        c = UDPClient.__new__(UDPClient)
+        c.sock = sock_a
+        c.username = 'Tester'
+        c.done = threading.Event()
+        c.peer_disconnected = False
+        c.name_colour = Fore.CYAN
+        c.text_colour = Fore.WHITE
+        priv = nacl.public.PrivateKey.generate()
+        c._privkey = priv
+        c._pubkey_bytes = bytes(priv.public_key)
+        c._peers_lock = threading.Lock()
+        c._peers = {
+            addr_of(sock_b): {
+                'box': box_a_b,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            },
+            addr_of(sock_c): {
+                'box': box_a_c,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            },
+        }
+        c._peers[addr_of(sock_b)]['connected'].set()
+        c._peers[addr_of(sock_c)]['connected'].set()
+
+        received = []
+        original = ui.print_msg
+
+        def capture(name_part, text_part, **kwargs):
+            received.append(name_part + text_part)
+
+        ui.print_msg = capture
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_b.sendto(box_b.encrypt(b'from B'), addr_of(sock_a))
+            sock_c.sendto(box_c.encrypt(b'from C'), addr_of(sock_a))
+            time.sleep(0.1)
+            # Disconnect both peers to end the session.
+            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            sock_c.sendto(box_c.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            ui.print_msg = original
+
+        assert any('from B' in r for r in received)
+        assert any('from C' in r for r in received)
+        sock_a.close()
+        sock_b.close()
+        sock_c.close()
+
+    def test_session_ends_only_when_all_peers_disconnect(self):
+        """done is set only after the last peer disconnects, not after the first."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        sock_c = make_udp_sock()
+
+        box_b, box_a_b = make_box_pair()
+        box_c, box_a_c = make_box_pair()
+
+        from colorama import Fore
+        c = UDPClient.__new__(UDPClient)
+        c.sock = sock_a
+        c.username = 'Tester'
+        c.done = threading.Event()
+        c.peer_disconnected = False
+        c.name_colour = Fore.CYAN
+        c.text_colour = Fore.WHITE
+        priv = nacl.public.PrivateKey.generate()
+        c._privkey = priv
+        c._pubkey_bytes = bytes(priv.public_key)
+        c._peers_lock = threading.Lock()
+        c._peers = {
+            addr_of(sock_b): {
+                'box': box_a_b,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            },
+            addr_of(sock_c): {
+                'box': box_a_c,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            },
+        }
+        c._peers[addr_of(sock_b)]['connected'].set()
+        c._peers[addr_of(sock_c)]['connected'].set()
+
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            time.sleep(0.1)
+            assert not c.done.is_set(), 'done set too early — one peer still connected'
+            sock_c.sendto(box_c.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+
+        assert c.done.is_set()
+        sock_a.close()
+        sock_b.close()
+        sock_c.close()
