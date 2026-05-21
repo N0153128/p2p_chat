@@ -276,12 +276,14 @@ class UDPClient:
                     name_part, body_part,
                     name_colour=self.peer_name_colour,
                     text_colour=self.peer_text_colour,
+                    alert=True,
                 )
             else:
                 ui.print_msg(
                     '', text,
                     name_colour=self.peer_name_colour,
                     text_colour=self.peer_text_colour,
+                    alert=True,
                 )
         try:
             self.sock.settimeout(None)

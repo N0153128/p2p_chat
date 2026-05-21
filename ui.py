@@ -146,7 +146,7 @@ def show_greeting():
 # ---------------------------------------------------------------------------
 
 
-def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
+def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE, alert=False):
     """Print an incoming chat message without clobbering the input prompt.
 
     Clears the current prompt line, writes the coloured message, then
@@ -159,9 +159,13 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
                        separator when *username_part* is non-empty).
         name_colour:   ANSI colour code applied to *username_part*.
         text_colour:   ANSI colour code applied to *text_part*.
+        alert:         If ``True``, emit a terminal bell character before the
+                       message so the user is notified of an incoming message.
     """
     with print_lock:
         sys.stdout.write(f'\r{" " * 80}\r')
+        if alert:
+            sys.stdout.write('\a')
         sys.stdout.write(
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL + '\n'
