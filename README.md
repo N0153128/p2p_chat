@@ -7,7 +7,9 @@ Serverless encrypted peer-to-peer chat over UDP. Works on local networks and acr
 - End-to-end encrypted (X25519 + XSalsa20-Poly1305 via PyNaCl)
 - LAN auto-discovery — no IP addresses to copy
 - Internet mode — direct peer-to-peer via UDP hole-punching
-- Custom colours for your username and message text
+- Custom colours for your username and message text (saved between sessions)
+- Local echo of sent messages with a `(you)` prefix in your own colours
+- Colourful terminal greeting with ASCII-art title and full-width borders
 - Clean disconnect notification when a peer leaves
 
 ## Requirements
@@ -22,7 +24,7 @@ pip install -r requirements.txt
 python3 client.py
 ```
 
-On startup you will be asked for your name and two colour choices (one for your username, one for your message text). Both peers must run the script before the connection can be established.
+On startup a greeting screen is displayed, then you are prompted for your name and two colour choices (one for your username, one for your message text). Preferences are saved to `~/.p2p_chat.json` and pre-filled on the next run. Both peers must run the script before the connection can be established.
 
 ### Local network (LAN)
 
