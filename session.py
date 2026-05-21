@@ -321,5 +321,11 @@ class UDPClient:
                         ),
                         self.remote,
                     )
+                    ui.print_msg(
+                        f'(you) <{self.username}>',
+                        f': {msg}',
+                        name_colour=self.name_colour,
+                        text_colour=self.text_colour,
+                    )
         except (KeyboardInterrupt, EOFError):
             pass
