@@ -22,7 +22,7 @@ import discovery
 import stun
 from discovery import lan_discover
 from session import UDPClient
-from ui import colour_for, pick_colour
+from ui import pick_colour
 
 
 def _get_local_ip():
@@ -64,21 +64,17 @@ if __name__ == '__main__':
     print()
 
     # --- colours ---
-    name_colour = pick_colour(
+    name_colour_name, name_colour = pick_colour(
         'Pick a colour for your name:',
         prefs['name_colour'],
     )
     print()
-    text_colour = pick_colour(
+    text_colour_name, text_colour = pick_colour(
         'Pick a colour for your message text:',
         prefs['text_colour'],
     )
     print()
 
-    # Resolve colour names back from ANSI codes to persist them.
-    from ui import COLOURS
-    name_colour_name = next((n for n, c in COLOURS if c == name_colour), 'cyan')
-    text_colour_name = next((n for n, c in COLOURS if c == text_colour), 'white')
     config.save(username, name_colour_name, text_colour_name)
 
     # --- network setup ---

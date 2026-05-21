@@ -92,7 +92,7 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
 
 
 def pick_colour(prompt, default_name):
-    """Display a numbered colour menu and return the chosen ANSI code.
+    """Display a numbered colour menu and return ``(name, ansi_code)``.
 
     Args:
         prompt:       Introductory line printed above the menu.
@@ -100,7 +100,7 @@ def pick_colour(prompt, default_name):
                       Enter without input.
 
     Returns:
-        An ANSI colour code string from :data:`COLOURS`.
+        ``(name, ansi_code)`` tuple from :data:`COLOURS`.
     """
     print(prompt)
     for i, (name, code) in enumerate(COLOURS, 1):
@@ -108,7 +108,7 @@ def pick_colour(prompt, default_name):
     while True:
         raw = input(f'Choose (1-{len(COLOURS)}, default {default_name}): ').strip()
         if not raw:
-            return colour_for(default_name)
+            return default_name, colour_for(default_name)
         if raw.isdigit() and 1 <= int(raw) <= len(COLOURS):
-            return COLOURS[int(raw) - 1][1]
+            return COLOURS[int(raw) - 1]
         print(f'Enter a number between 1 and {len(COLOURS)}.')
