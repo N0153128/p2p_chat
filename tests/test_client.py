@@ -65,6 +65,7 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999)):
     c.name_colour = Fore.CYAN
     c.text_colour = Fore.WHITE
     c.peer_name_colour = Fore.CYAN
+    c.peer_text_colour = Fore.WHITE
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)

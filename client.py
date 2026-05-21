@@ -4,6 +4,7 @@ p2p_chat — entry point.
 Handles startup prompts, socket setup, and the mode selection loop.
 All business logic lives in the dedicated modules:
 
+  config     — preference load/save (~/.p2p_chat.json)
   protocol   — wire constants and tuneable timeouts
   stun       — public IP/port discovery (RFC 5389)
   discovery  — LAN peer discovery via authenticated UDP broadcast
@@ -16,11 +17,12 @@ import sys
 
 from colorama import Fore, Style
 
+import config
 import discovery
 import stun
 from discovery import lan_discover
 from session import UDPClient
-from ui import pick_colour
+from ui import colour_for, pick_colour
 
 
 def _get_local_ip():
@@ -39,14 +41,47 @@ def _get_local_ip():
         return '127.0.0.1'
 
 
+def _prompt_with_default(prompt, default):
+    """Show *prompt*, return *default* if the user presses Enter without input.
+
+    Args:
+        prompt:  Text shown to the user (should not include the default hint,
+                 that is appended automatically).
+        default: Value returned on empty input.
+
+    Returns:
+        Stripped string — either what the user typed or *default*.
+    """
+    raw = input(f'{prompt} [{default}]: ').strip()
+    return raw if raw else default
+
+
 if __name__ == '__main__':
-    username = input('Type your name: ')
-    print()
-    name_colour = pick_colour('Pick a colour for your name:', 'cyan')
-    print()
-    text_colour = pick_colour('Pick a colour for your message text:', 'white')
+    prefs = config.load()
+
+    # --- username ---
+    username = _prompt_with_default('Your name', prefs['username'] or 'anonymous')
     print()
 
+    # --- colours ---
+    name_colour = pick_colour(
+        'Pick a colour for your name:',
+        prefs['name_colour'],
+    )
+    print()
+    text_colour = pick_colour(
+        'Pick a colour for your message text:',
+        prefs['text_colour'],
+    )
+    print()
+
+    # Resolve colour names back from ANSI codes to persist them.
+    from ui import COLOURS
+    name_colour_name = next((n for n, c in COLOURS if c == name_colour), 'cyan')
+    text_colour_name = next((n for n, c in COLOURS if c == text_colour), 'white')
+    config.save(username, name_colour_name, text_colour_name)
+
+    # --- network setup ---
     discovery.local_ip = _get_local_ip()
 
     # Chat socket binds to an OS-assigned port so two instances on the same

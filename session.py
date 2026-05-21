@@ -96,6 +96,7 @@ class UDPClient:
         self.name_colour = name_colour
         self.text_colour = text_colour
         self.peer_name_colour = Fore.CYAN
+        self.peer_text_colour = Fore.WHITE
 
         self._privkey = nacl.public.PrivateKey.generate()
         self._pubkey_bytes = bytes(self._privkey.public_key)
@@ -249,10 +250,12 @@ class UDPClient:
                 break
 
             if plaintext.startswith(CTRL_META_PREFIX):
-                colour_name = plaintext[len(CTRL_META_PREFIX):].decode(
+                parts = plaintext[len(CTRL_META_PREFIX):].decode(
                     errors='ignore'
-                ).strip()
-                self.peer_name_colour = colour_for(colour_name)
+                ).strip().split(',')
+                self.peer_name_colour = colour_for(parts[0])
+                if len(parts) >= 2:
+                    self.peer_text_colour = colour_for(parts[1])
                 continue
 
             text = plaintext.decode('utf-8', errors='replace')
@@ -266,13 +269,13 @@ class UDPClient:
                 ui.print_msg(
                     name_part, body_part,
                     name_colour=self.peer_name_colour,
-                    text_colour=self.text_colour,
+                    text_colour=self.peer_text_colour,
                 )
             else:
                 ui.print_msg(
                     '', text,
                     name_colour=self.peer_name_colour,
-                    text_colour=self.text_colour,
+                    text_colour=self.peer_text_colour,
                 )
 
     def _send_loop(self):
@@ -285,11 +288,15 @@ class UDPClient:
         self.connected.wait()
         try:
             if self.box:
-                colour_name = next(
+                name_colour_name = next(
                     (n for n, c in COLOURS if c == self.name_colour), 'cyan'
                 )
+                text_colour_name = next(
+                    (n for n, c in COLOURS if c == self.text_colour), 'white'
+                )
+                meta = f'{name_colour_name},{text_colour_name}'.encode()
                 self.sock.sendto(
-                    self.box.encrypt(CTRL_META_PREFIX + colour_name.encode()),
+                    self.box.encrypt(CTRL_META_PREFIX + meta),
                     self.remote,
                 )
                 self.sock.sendto(
