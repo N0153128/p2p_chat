@@ -5,6 +5,7 @@ message printing, and the interactive colour picker shown at startup.
 
 import math
 import os
+import random
 import shutil
 import struct
 import subprocess
@@ -42,13 +43,57 @@ COLOUR_NAMES = [name for name, _ in COLOURS]
 print_lock = threading.Lock()
 """Mutex that serialises all terminal writes to prevent interleaved output."""
 
-# Gradient used to colour the ASCII-art title: green → red.
-_TITLE_GRADIENT = [
-    Fore.GREEN,
-    Fore.GREEN + Style.BRIGHT,
-    Fore.YELLOW + Style.BRIGHT,
-    Fore.RED + Style.BRIGHT,
-    Fore.RED,
+# Each preset is (font, gradient, top_border_colour, bottom_border_colour).
+# Picked randomly on every boot.
+_GREETING_PRESETS = [
+    (
+        'doom',
+        [Fore.GREEN, Fore.GREEN + Style.BRIGHT, Fore.YELLOW + Style.BRIGHT,
+         Fore.RED + Style.BRIGHT, Fore.RED],
+        Fore.GREEN, Fore.RED,
+    ),
+    (
+        'ansi_shadow',
+        [Fore.CYAN, Fore.CYAN + Style.BRIGHT, Fore.BLUE + Style.BRIGHT,
+         Fore.MAGENTA + Style.BRIGHT, Fore.MAGENTA],
+        Fore.CYAN, Fore.MAGENTA,
+    ),
+    (
+        'slant',
+        [Fore.YELLOW + Style.BRIGHT, Fore.GREEN + Style.BRIGHT,
+         Fore.CYAN + Style.BRIGHT, Fore.BLUE + Style.BRIGHT, Fore.BLUE],
+        Fore.YELLOW, Fore.BLUE,
+    ),
+    (
+        'bloody',
+        [Fore.RED, Fore.RED + Style.BRIGHT, Fore.MAGENTA + Style.BRIGHT,
+         Fore.RED + Style.BRIGHT, Fore.RED],
+        Fore.RED + Style.BRIGHT, Fore.RED,
+    ),
+    (
+        'block',
+        [Fore.WHITE + Style.BRIGHT, Fore.CYAN + Style.BRIGHT,
+         Fore.BLUE + Style.BRIGHT, Fore.MAGENTA + Style.BRIGHT, Fore.MAGENTA],
+        Fore.WHITE, Fore.MAGENTA,
+    ),
+    (
+        'graffiti',
+        [Fore.MAGENTA + Style.BRIGHT, Fore.BLUE + Style.BRIGHT,
+         Fore.CYAN + Style.BRIGHT, Fore.GREEN + Style.BRIGHT, Fore.GREEN],
+        Fore.MAGENTA, Fore.GREEN,
+    ),
+    (
+        'isometric1',
+        [Fore.CYAN + Style.BRIGHT, Fore.BLUE + Style.BRIGHT,
+         Fore.BLUE, Fore.MAGENTA, Fore.MAGENTA + Style.BRIGHT],
+        Fore.CYAN, Fore.BLUE,
+    ),
+    (
+        'larry3d',
+        [Fore.YELLOW + Style.BRIGHT, Fore.YELLOW,
+         Fore.RED + Style.BRIGHT, Fore.RED, Fore.RED + Style.BRIGHT],
+        Fore.YELLOW, Fore.RED,
+    ),
 ]
 
 
@@ -95,23 +140,24 @@ def show_greeting():
     tagline.  Safe to call before colorama.init() — colorama codes work on
     ANSI-capable terminals without explicit initialisation.
     """
+    font, gradient, top_colour, bot_colour = random.choice(_GREETING_PRESETS)
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
 
     # --- ASCII art title ---
-    art = pyfiglet.figlet_format('p2p  chat', font='doom')
+    art = pyfiglet.figlet_format('p2p  chat', font=font)
     art_lines = art.splitlines()
-    art_width = max(len(line) for line in art_lines)
+    art_width = max((len(line) for line in art_lines), default=0)
 
     # Apply a vertical gradient across the title lines.
-    gradient_len = len(_TITLE_GRADIENT)
+    gradient_len = len(gradient)
     coloured_lines = []
     for i, line in enumerate(art_lines):
-        colour = _TITLE_GRADIENT[i * gradient_len // max(len(art_lines), 1)]
+        colour = gradient[i * gradient_len // max(len(art_lines), 1)]
         coloured_lines.append(colour + Style.BRIGHT + line + Style.RESET_ALL)
 
     # --- top border ---
     sys.stdout.write('\n')
-    sys.stdout.write(Fore.GREEN + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
+    sys.stdout.write(top_colour + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
     sys.stdout.write('\n')
 
     # --- centred title ---
@@ -132,16 +178,16 @@ def show_greeting():
     # --- sub-rule ---
     sys.stdout.write('\n')
     sys.stdout.write(
-        Fore.RED + Style.BRIGHT + _centre(_rule(len(tagline) + 8, '·'), cols) + Style.RESET_ALL + '\n'
+        bot_colour + Style.BRIGHT + _centre(_rule(len(tagline) + 8, '·'), cols) + Style.RESET_ALL + '\n'
     )
 
-    # --- version / help hint ---
+    # --- hint ---
     hint = 'press  Ctrl+C  at any time to quit'
     sys.stdout.write(Fore.WHITE + _centre(hint, cols) + Style.RESET_ALL + '\n')
 
     # --- bottom border ---
     sys.stdout.write('\n')
-    sys.stdout.write(Fore.RED + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
+    sys.stdout.write(bot_colour + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
     sys.stdout.write('\n')
     sys.stdout.flush()
 
