@@ -3,35 +3,47 @@ Encrypted peer-to-peer UDP chat session.
 
 :class:`UDPClient` manages a multi-peer chat room session.  Up to
 :data:`~protocol.MAX_PEERS` peers can share the same room simultaneously.
-Each peer gets its own X25519 key-exchange and ``nacl.public.Box``; outgoing
-messages are encrypted and sent to every connected peer individually.
+
+LAN mode
+--------
+Pass ``room_code`` and ``chat_port`` to the constructor.  A background
+discovery thread broadcasts beacons and punches through to every new peer
+it finds for the entire lifetime of the room, so late joiners connect
+automatically without restarting.
+
+Internet mode
+-------------
+Pass a list of explicit ``(ip, port)`` peer addresses.  Discovery is
+skipped; hole-punching starts immediately for each address.
 
 Lifecycle
 ---------
 1. An ephemeral X25519 keypair is generated (shared across all peers).
-2. ``_recv_loop`` starts immediately in a daemon thread.
-3. For each peer address supplied, a ``_punch`` thread is started.
-4. ``_recv_loop`` processes incoming packets from any known peer address:
+2. ``_recv_loop`` starts immediately.
+3. For LAN mode, ``_discover_loop`` broadcasts beacons in the background
+   and calls ``_add_peer`` for each new peer found.  For internet mode,
+   all peers are added up front.
+4. ``_recv_loop`` processes incoming packets:
 
-   - **PUNCH** — builds the per-peer ``Box``, replies with PUNCH_ACK + our
-     public key, marks that peer connected.
-   - **PUNCH_ACK** — builds the per-peer ``Box``, marks that peer connected.
-   - **Encrypted payload** — tries all connected peers' boxes; handles
+   - **PUNCH from known peer** — builds the Box, sends PUNCH_ACK, marks
+     connected, sends colour meta and join announcement to that peer.
+   - **PUNCH from unknown addr** — if room has space, auto-adds the peer
+     (late LAN joiner or internet peer we haven't punched yet), then
+     processes as above.
+   - **PUNCH_ACK** — builds the Box, marks connected.
+   - **Encrypted payload** — decrypts with the sender's Box; handles
      CTRL_DISCONNECT, CTRL_META_PREFIX, and chat text.
 
-5. ``__init__`` blocks on ``done.wait()`` so the caller returns only after
-   the session ends (all peers left, /exit, or SIGINT).
+5. ``__init__`` blocks on ``done.wait()``.
 
 Encryption
 ----------
-All post-handshake payloads use ``nacl.public.Box`` (X25519 key agreement,
-XSalsa20-Poly1305 AEAD).  Packets that fail authentication against every
-known peer box are dropped silently.
+All post-handshake payloads use ``nacl.public.Box`` (X25519 + XSalsa20-Poly1305).
 
 Source validation
 -----------------
-``_recv_loop`` only processes packets whose source address appears in the
-set of known peer addresses, preventing injection from third parties.
+Only PUNCH packets are accepted from unknown addresses (to allow late
+joiners).  All other packet types require the source to be a known peer.
 """
 
 import os
@@ -46,6 +58,7 @@ from colorama import Fore, Style
 import discovery
 from protocol import (
     BEACON_PREFIX,
+    BROADCAST_INTERVAL,
     CTRL_DISCONNECT,
     CTRL_META_PREFIX,
     MAX_PEERS,
@@ -62,66 +75,76 @@ class UDPClient:
     """Encrypted multi-peer UDP chat room session.
 
     Args:
-        peers:        List of ``(ip, port)`` tuples to connect to.
         sock:         Bound ``SOCK_DGRAM`` socket used for all I/O.
         username:     Local user's display name.
         name_colour:  ANSI code for our username colour.
         text_colour:  ANSI code for our message body colour.
+        peers:        List of ``(ip, port)`` for internet mode.  Mutually
+                      exclusive with *room_code*.
+        room_code:    Shared room secret for LAN discovery mode.  Mutually
+                      exclusive with *peers*.
+        chat_port:    Our chat socket port, embedded in LAN beacons.
     """
 
-    def __init__(self, peers, sock, username, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
+    def __init__(
+        self,
+        sock,
+        username,
+        name_colour=Fore.CYAN,
+        text_colour=Fore.WHITE,
+        peers=None,
+        room_code=None,
+        chat_port=None,
+    ):
         self.sock = sock
         self.username = username
         self.name_colour = name_colour
         self.text_colour = text_colour
 
-        # done is set when the local user exits or all peers have disconnected.
         self.done = threading.Event()
-        # Set to True when at least one peer disconnected (vs. local /exit).
+        # True when at least one peer disconnected (not a local /exit).
         self.peer_disconnected = False
 
         self._privkey = nacl.public.PrivateKey.generate()
         self._pubkey_bytes = bytes(self._privkey.public_key)
 
-        # Per-peer state, keyed by (ip, port).
-        # Each entry: {'box': Box|None, 'connected': Event,
-        #              'name_colour': str, 'text_colour': str}
+        # Per-peer state keyed by (ip, port).
+        # {'box': Box|None, 'connected': Event, 'name_colour': code, 'text_colour': code}
         self._peers_lock = threading.Lock()
-        self._peers = {
-            addr: {
-                'box': None,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-            }
-            for addr in peers
-        }
+        self._peers = {}
+
+        # first_connected is set the moment any peer completes the handshake.
+        self._first_connected = threading.Event()
 
         self._prev_sigint = signal.signal(signal.SIGINT, self._handle_sigint)
 
         recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
         recv_thread.start()
 
-        for addr in peers:
-            t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
-            t.start()
-
-        # Wait until at least one peer connects (or all time out).
-        deadline = time() + PUNCH_TIMEOUT
-        while time() < deadline and not self.done.is_set():
-            with self._peers_lock:
-                if any(p['connected'].is_set() for p in self._peers.values()):
-                    break
-            sleep(0.1)
+        if room_code and chat_port:
+            # LAN mode: discovery runs for the life of the room.
+            disc_thread = threading.Thread(
+                target=self._discover_loop,
+                args=(chat_port, room_code),
+                daemon=True,
+            )
+            disc_thread.start()
         else:
-            with self._peers_lock:
-                connected = [a for a, p in self._peers.items() if p['connected'].is_set()]
-            if not connected:
+            # Internet mode: add all peers up front.
+            for addr in (peers or []):
+                self._add_peer(addr)
+
+        # In LAN mode, wait indefinitely — the discovery loop runs forever
+        # and a peer may join at any time.  In internet mode, give up after
+        # PUNCH_TIMEOUT seconds if the explicit peer list never connects.
+        timeout = None if (room_code and chat_port) else PUNCH_TIMEOUT
+        if not self._first_connected.wait(timeout=timeout):
+            with print_lock:
                 print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
                 print('Your peer may be behind Symmetric NAT, or started too late.')
-                self.done.set()
-                signal.signal(signal.SIGINT, self._prev_sigint)
-                return
+            self.done.set()
+            signal.signal(signal.SIGINT, self._prev_sigint)
+            return
 
         send_thread = threading.Thread(target=self._send_loop, daemon=True)
         send_thread.start()
@@ -130,18 +153,40 @@ class UDPClient:
         signal.signal(signal.SIGINT, self._prev_sigint)
 
     # ------------------------------------------------------------------
+    # Peer management
+    # ------------------------------------------------------------------
+
+    def _add_peer(self, addr):
+        """Register *addr* as a known peer and start punching to it.
+
+        No-op if the peer is already known or the room is full.
+        Returns True if the peer was newly added.
+        """
+        with self._peers_lock:
+            if addr in self._peers or len(self._peers) >= MAX_PEERS:
+                return False
+            self._peers[addr] = {
+                'box': None,
+                'connected': threading.Event(),
+                'name_colour': Fore.CYAN,
+                'text_colour': Fore.WHITE,
+            }
+        t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
+        t.start()
+        return True
+
+    # ------------------------------------------------------------------
     # Signal handling
     # ------------------------------------------------------------------
 
     def _handle_sigint(self, sig, frame):
-        """Send disconnect to all peers and exit."""
         self._broadcast(CTRL_DISCONNECT)
         print()
         self.done.set()
         sys.exit(0)
 
     # ------------------------------------------------------------------
-    # Handshake helpers
+    # Packet helpers
     # ------------------------------------------------------------------
 
     def _make_punch_msg(self):
@@ -151,19 +196,19 @@ class UDPClient:
         return PUNCH_ACK_PREFIX + self._pubkey_bytes.hex().encode()
 
     def _build_box(self, addr, peer_pubkey_hex):
-        """Construct the Box for *addr* from the peer's public key hex."""
-        peer_pub = nacl.public.PublicKey(bytes.fromhex(peer_pubkey_hex))
-        box = nacl.public.Box(self._privkey, peer_pub)
+        """Build and store the Box for *addr*. Returns the Box, or None on error."""
+        try:
+            peer_pub = nacl.public.PublicKey(bytes.fromhex(peer_pubkey_hex))
+            box = nacl.public.Box(self._privkey, peer_pub)
+        except Exception:
+            return None
         with self._peers_lock:
             if addr in self._peers:
                 self._peers[addr]['box'] = box
-
-    # ------------------------------------------------------------------
-    # Broadcast helper
-    # ------------------------------------------------------------------
+        return box
 
     def _broadcast(self, plaintext):
-        """Encrypt *plaintext* and send it to every connected peer."""
+        """Encrypt *plaintext* and send to every connected peer."""
         with self._peers_lock:
             targets = [
                 (addr, p['box'])
@@ -176,23 +221,118 @@ class UDPClient:
             except Exception:
                 pass
 
+    def _send_meta_to(self, addr, box):
+        """Send our colour metadata and join announcement to a single peer."""
+        name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
+        text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
+        meta = f'{name_colour_name},{text_colour_name}'.encode()
+        try:
+            self.sock.sendto(box.encrypt(CTRL_META_PREFIX + meta), addr)
+            self.sock.sendto(
+                box.encrypt(f'{self.username} joined'.encode()), addr
+            )
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Networking threads
     # ------------------------------------------------------------------
 
     def _punch(self, addr):
-        """Repeatedly send PUNCH packets to *addr* until connected or timed out."""
-        deadline = time() + PUNCH_TIMEOUT
+        """Send PUNCH packets to *addr* until connected, done, or timed out."""
         with self._peers_lock:
             peer = self._peers.get(addr)
         if peer is None:
             return
+        deadline = time() + PUNCH_TIMEOUT
         while not peer['connected'].is_set() and not self.done.is_set() and time() < deadline:
             try:
                 self.sock.sendto(self._make_punch_msg(), addr)
             except Exception:
                 pass
             sleep(PUNCH_INTERVAL)
+
+    def _discover_loop(self, chat_port, room_code):
+        """Broadcast LAN beacons and add peers for the life of the room.
+
+        Runs as a daemon thread.  Opens its own discovery socket (separate
+        from the chat socket) and broadcasts every BROADCAST_INTERVAL seconds.
+        Whenever a valid authenticated beacon arrives from a new peer, calls
+        _add_peer so it gets punched and connected without interrupting chat.
+        """
+        import hashlib
+        import hmac as hmaclib
+        import socket as socklib
+
+        tag = discovery._beacon_hmac(room_code, discovery.SESSION_ID)
+        my_beacon = BEACON_PREFIX + f'{discovery.SESSION_ID}:{chat_port}:{tag}'.encode()
+        seen_sids = set()
+
+        try:
+            disc = socklib.socket(socklib.AF_INET, socklib.SOCK_DGRAM)
+            disc.setsockopt(socklib.SOL_SOCKET, socklib.SO_REUSEADDR, 1)
+            disc.setsockopt(socklib.SOL_SOCKET, socklib.SO_BROADCAST, 1)
+            disc.bind(('0.0.0.0', discovery.DISCOVERY_PORT))
+            disc.settimeout(BROADCAST_INTERVAL)
+        except OSError:
+            return
+
+        broadcast = discovery._broadcast_addr()
+
+        try:
+            while not self.done.is_set():
+                try:
+                    disc.sendto(my_beacon, (broadcast, discovery.DISCOVERY_PORT))
+                except Exception:
+                    pass
+
+                try:
+                    data, addr = disc.recvfrom(4096)
+                except (TimeoutError, OSError):
+                    continue
+
+                if not data.startswith(BEACON_PREFIX):
+                    continue
+
+                payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
+                parts = payload.split(':')
+                if len(parts) != 3:
+                    continue
+
+                peer_sid, peer_port_str, peer_tag = parts
+
+                if peer_sid == discovery.SESSION_ID or peer_sid in seen_sids:
+                    continue
+
+                expected = discovery._beacon_hmac(room_code, peer_sid)
+                if not hmaclib.compare_digest(peer_tag, expected):
+                    continue
+
+                try:
+                    peer_port = int(peer_port_str)
+                except ValueError:
+                    continue
+
+                seen_sids.add(peer_sid)
+                peer_addr = (addr[0], peer_port)
+
+                with self._peers_lock:
+                    already_known = peer_addr in self._peers
+                    full = len(self._peers) >= MAX_PEERS
+
+                if already_known or full:
+                    continue
+
+                # Unicast our beacon back so the peer sees us too.
+                try:
+                    disc.sendto(my_beacon, addr)
+                except Exception:
+                    pass
+
+                self._add_peer(peer_addr)
+
+        finally:
+            disc.close()
 
     def _recv_loop(self):
         """Receive and dispatch all incoming UDP packets for this session."""
@@ -206,20 +346,25 @@ class UDPClient:
                 self.done.set()
                 break
 
-            with self._peers_lock:
-                known = addr in self._peers
-
-            if not known:
-                continue  # drop packets from unknown sources
-
             if data.startswith(BEACON_PREFIX):
                 continue
 
+            with self._peers_lock:
+                known = addr in self._peers
+                full = len(self._peers) >= MAX_PEERS
+
+            # Accept PUNCH from unknown addresses: this is a late joiner
+            # punching us first (common when we sent them a beacon reply).
+            if not known:
+                if data.startswith(PUNCH_PREFIX) and not full:
+                    self._add_peer(addr)
+                else:
+                    continue
+
             if data.startswith(PUNCH_PREFIX):
                 peer_pubkey_hex = data[len(PUNCH_PREFIX):].decode(errors='ignore')
-                try:
-                    self._build_box(addr, peer_pubkey_hex)
-                except Exception:
+                box = self._build_box(addr, peer_pubkey_hex)
+                if box is None:
                     continue
                 try:
                     self.sock.sendto(self._make_punch_ack(), addr)
@@ -229,11 +374,13 @@ class UDPClient:
                     peer = self._peers.get(addr)
                 if peer and not peer['connected'].is_set():
                     peer['connected'].set()
+                    self._first_connected.set()
+                    self._send_meta_to(addr, box)
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Connected to {addr[0]}:{addr[1]}! (encrypted)\n'
+                            + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
                             + Style.RESET_ALL
                         )
                         sys.stdout.flush()
@@ -241,25 +388,25 @@ class UDPClient:
 
             if data.startswith(PUNCH_ACK_PREFIX):
                 peer_pubkey_hex = data[len(PUNCH_ACK_PREFIX):].decode(errors='ignore')
-                try:
-                    self._build_box(addr, peer_pubkey_hex)
-                except Exception:
+                box = self._build_box(addr, peer_pubkey_hex)
+                if box is None:
                     continue
                 with self._peers_lock:
                     peer = self._peers.get(addr)
                 if peer and not peer['connected'].is_set():
                     peer['connected'].set()
+                    self._first_connected.set()
+                    self._send_meta_to(addr, box)
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Connected to {addr[0]}:{addr[1]}! (encrypted)\n'
+                            + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
                             + Style.RESET_ALL
                         )
                         sys.stdout.flush()
                 continue
 
-            # Try to decrypt with this peer's box.
             with self._peers_lock:
                 peer = self._peers.get(addr)
             if peer is None or peer['box'] is None:
@@ -278,20 +425,19 @@ class UDPClient:
                     sys.stdout.write(f'\r{" " * 80}\r')
                     sys.stdout.write(
                         Fore.LIGHTYELLOW_EX + Style.BRIGHT
-                        + f'{addr[0]}:{addr[1]} disconnected.'
+                        + f'A peer left.'
                         + (f'  ({remaining} peer{"s" if remaining != 1 else ""} remaining)'
                            if remaining else '')
                         + '\n' + Style.RESET_ALL
                     )
                     sys.stdout.flush()
                 self.peer_disconnected = True
-                if remaining == 0:
-                    self.done.set()
-                    try:
-                        os.write(sys.stdin.fileno(), b'\n')
-                    except Exception:
-                        pass
-                    break
+                # Only end the session if no peers remain AND discovery is done.
+                # In LAN mode, done is never set here — the room stays open.
+                if remaining == 0 and not self.done.is_set():
+                    # In internet mode (no background discovery), end the session.
+                    # In LAN mode, keep waiting — _discover_loop will find new peers.
+                    pass
                 continue
 
             if plaintext.startswith(CTRL_META_PREFIX):
@@ -328,13 +474,6 @@ class UDPClient:
 
     def _send_loop(self):
         """Read stdin and broadcast encrypted messages to all connected peers."""
-        # Send our colour metadata and join announcement to all peers.
-        name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
-        text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
-        meta = f'{name_colour_name},{text_colour_name}'.encode()
-        self._broadcast(CTRL_META_PREFIX + meta)
-        self._broadcast(f'{self.username} joined'.encode())
-
         try:
             while not self.done.is_set():
                 with print_lock:

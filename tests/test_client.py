@@ -69,9 +69,11 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
     c._peers_lock = threading.Lock()
+    c._first_connected = threading.Event()
     connected_event = threading.Event()
     if box is not None:
         connected_event.set()
+        c._first_connected.set()
     c._peers = {
         remote_addr: {
             'box': box,
@@ -309,13 +311,15 @@ class TestUDPClientKeyExchange:
         assert plaintext == b'hello'
         sock.close()
 
-    def test_build_box_invalid_hex_raises(self):
-        """_build_box raises an exception on bad pubkey hex."""
+    def test_build_box_invalid_hex_returns_none(self):
+        """_build_box returns None and leaves the peer's box unset on bad pubkey hex."""
         sock = make_udp_sock()
         remote = ('127.0.0.1', 9999)
         c = make_client_obj(sock, remote_addr=remote)
-        with pytest.raises(Exception):
-            c._build_box(remote, 'not-valid-hex')
+        result = c._build_box(remote, 'not-valid-hex')
+        assert result is None
+        with c._peers_lock:
+            assert c._peers[remote]['box'] is None
         sock.close()
 
 
@@ -349,7 +353,7 @@ class TestSourceAddressValidation:
             time.sleep(0.05)
             sock_b.sendto(box_b.encrypt(b'real message'), addr_of(sock_a))
             time.sleep(0.05)
-            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            c.done.set()
             t.join(timeout=3)
         finally:
             ui.print_msg = original
@@ -388,7 +392,7 @@ class TestEncryption:
             time.sleep(0.05)
             sock_b.sendto(box_b.encrypt(b'secret text'), addr_of(sock_a))
             time.sleep(0.1)
-            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            c.done.set()
             t.join(timeout=3)
         finally:
             ui.print_msg = original
@@ -418,13 +422,7 @@ class TestEncryption:
             time.sleep(0.05)
             sock_b.sendto(b'not encrypted', addr_of(sock_a))
             time.sleep(0.1)
-            # Replace the box with a valid one and send disconnect to end the loop.
-            priv_peer = nacl.public.PrivateKey.generate()
-            box_legit_peer = nacl.public.Box(priv_peer, c._privkey.public_key)
-            new_box = nacl.public.Box(c._privkey, priv_peer.public_key)
-            with c._peers_lock:
-                c._peers[addr_of(sock_b)]['box'] = new_box
-            sock_b.sendto(box_legit_peer.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            c.done.set()
             t.join(timeout=3)
         finally:
             ui.print_msg = original
@@ -544,8 +542,8 @@ class TestPunchHandshakeInRecvLoop:
 
 class TestDisconnect:
 
-    def test_ctrl_disconnect_sets_done(self):
-        """Receiving CTRL_DISCONNECT (encrypted) sets done and exits _recv_loop."""
+    def test_ctrl_disconnect_sets_peer_disconnected(self):
+        """Receiving CTRL_DISCONNECT sets peer_disconnected; room stays open."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
 
@@ -559,11 +557,14 @@ class TestDisconnect:
             t.start()
             time.sleep(0.05)
             sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            time.sleep(0.1)
+            assert c.peer_disconnected
+            assert not c.done.is_set()  # room stays open
+            c.done.set()
             t.join(timeout=3)
         finally:
             sys.stdout = old_stdout
 
-        assert c.done.is_set()
         sock_a.close()
         sock_b.close()
 
@@ -591,7 +592,7 @@ class TestDisconnect:
             time.sleep(0.05)
             sock_b.sendto(box_b.encrypt(b'hello'), addr_of(sock_a))
             time.sleep(0.05)
-            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            c.done.set()
             t.join(timeout=3)
         finally:
             ui.print_msg = original
@@ -656,6 +657,8 @@ class TestMultiPeer:
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._first_connected = threading.Event()
+        c._first_connected.set()
         c._peers = {
             addr_of(sock_b): {
                 'box': box_a_b,
@@ -687,9 +690,7 @@ class TestMultiPeer:
             sock_b.sendto(box_b.encrypt(b'from B'), addr_of(sock_a))
             sock_c.sendto(box_c.encrypt(b'from C'), addr_of(sock_a))
             time.sleep(0.1)
-            # Disconnect both peers to end the session.
-            sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
-            sock_c.sendto(box_c.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            c.done.set()
             t.join(timeout=3)
         finally:
             ui.print_msg = original
@@ -701,7 +702,7 @@ class TestMultiPeer:
         sock_c.close()
 
     def test_session_ends_only_when_all_peers_disconnect(self):
-        """done is set only after the last peer disconnects, not after the first."""
+        """done is NOT set when peers disconnect — room stays open for new joiners."""
         sock_a = make_udp_sock()
         sock_b = make_udp_sock()
         sock_c = make_udp_sock()
@@ -721,6 +722,8 @@ class TestMultiPeer:
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._first_connected = threading.Event()
+        c._first_connected.set()
         c._peers = {
             addr_of(sock_b): {
                 'box': box_a_b,
@@ -745,14 +748,16 @@ class TestMultiPeer:
             t.start()
             time.sleep(0.05)
             sock_b.sendto(box_b.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
-            time.sleep(0.1)
-            assert not c.done.is_set(), 'done set too early — one peer still connected'
             sock_c.sendto(box_c.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            time.sleep(0.1)
+            # Room stays open even after all peers disconnect.
+            assert not c.done.is_set()
+            assert c.peer_disconnected
+            c.done.set()
             t.join(timeout=3)
         finally:
             sys.stdout = old_stdout
 
-        assert c.done.is_set()
         sock_a.close()
         sock_b.close()
         sock_c.close()

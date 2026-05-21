@@ -20,7 +20,6 @@ from colorama import Fore, Style
 import config
 import discovery
 import stun
-from discovery import lan_discover
 from session import UDPClient
 from ui import pick_colour, show_greeting
 
@@ -118,31 +117,31 @@ if __name__ == '__main__':
                 if not room_code:
                     print('Room code cannot be empty.')
                     continue
-                while True:
-                    peers = lan_discover(chat_port, room_code)
-                    if not peers:
-                        print(Fore.LIGHTRED_EX + Style.BRIGHT + 'No peers found on the local network.')
-                        break
-                    session = UDPClient(
-                        peers, sock,
-                        username=username,
-                        name_colour=name_colour,
-                        text_colour=text_colour,
-                    )
-                    if not session.peer_disconnected:
-                        break
-                    # At least one peer left — wait for new connections.
-                    print(Fore.CYAN + Style.BRIGHT + 'Waiting for a new peer to join...' + Style.RESET_ALL)
+                print(Fore.CYAN + Style.BRIGHT
+                      + 'Waiting for peers to join your room...'
+                      + Style.RESET_ALL)
+                UDPClient(
+                    sock,
+                    username=username,
+                    name_colour=name_colour,
+                    text_colour=text_colour,
+                    room_code=room_code,
+                    chat_port=chat_port,
+                )
             elif mode == 'g':
                 peer_ip = input("Peer's public IP: ").strip()
                 if not peer_ip:
                     continue
                 peer_port = int(input("Peer's port: ").strip())
+                print(Fore.CYAN + Style.BRIGHT
+                      + 'Connecting... others can join by entering your IP and port above.'
+                      + Style.RESET_ALL)
                 UDPClient(
-                    [(peer_ip, peer_port)], sock,
+                    sock,
                     username=username,
                     name_colour=name_colour,
                     text_colour=text_colour,
+                    peers=[(peer_ip, peer_port)],
                 )
             else:
                 print('Enter l or g.')

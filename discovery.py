@@ -25,7 +25,6 @@ from protocol import (
     BROADCAST_INTERVAL,
     BROADCAST_TIMEOUT,
     DISCOVERY_PORT,
-    MAX_PEERS,
 )
 
 
@@ -85,27 +84,17 @@ def _beacon_hmac(room_code, session_id):
 
 
 def lan_discover(chat_port, room_code):
-    """Broadcast authenticated beacons and return all matching peers found.
+    """Broadcast authenticated beacons and return the first matching peer.
 
-    Opens a temporary UDP socket on :data:`~protocol.DISCOVERY_PORT`
-    (separate from the chat socket so two instances on the same machine
-    don't collide).  Broadcasts a beacon every
-    :data:`~protocol.BROADCAST_INTERVAL` seconds and collects beacons from
-    other peers for the full :data:`~protocol.BROADCAST_TIMEOUT` window.
-    A peer is accepted only if its HMAC tag matches the expected value for
-    *room_code*.
-
-    Once the window closes (or :data:`~protocol.MAX_PEERS` peers are found),
-    a final unicast beacon is sent to each discovered peer so they know we
-    found them, then the function returns.
+    Used by tests and internet-fallback flows.  For LAN room sessions,
+    discovery runs continuously inside :class:`~session.UDPClient`.
 
     Args:
-        chat_port:  Our chat socket's port (embedded in the beacon so the
-                    peer knows where to send chat packets).
+        chat_port:  Our chat socket's port.
         room_code:  Shared secret used to authenticate beacons.
 
     Returns:
-        List of ``(peer_ip, peer_chat_port)`` tuples (possibly empty).
+        ``(peer_ip, peer_chat_port)`` on success, or ``None`` on timeout.
     """
     disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     disc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -117,60 +106,41 @@ def lan_discover(chat_port, room_code):
     tag = _beacon_hmac(room_code, SESSION_ID)
     my_beacon = BEACON_PREFIX + f'{SESSION_ID}:{chat_port}:{tag}'.encode()
 
-    peers = {}   # (ip, chat_port) → source addr for unicast reply
-    seen_sids = set()
-
-    print(Fore.LIGHTGREEN_EX + Style.BRIGHT + 'Scanning local network for peers...')
     deadline = time() + BROADCAST_TIMEOUT
     try:
-        while time() < deadline and len(peers) < MAX_PEERS:
+        while time() < deadline:
             try:
                 disc.sendto(my_beacon, (broadcast, DISCOVERY_PORT))
             except Exception:
                 pass
-
             try:
                 data, addr = disc.recvfrom(4096)
             except (TimeoutError, socket.timeout):
                 continue
             except OSError:
-                break
+                return None
 
             if not data.startswith(BEACON_PREFIX):
                 continue
-
             payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
             parts = payload.split(':')
             if len(parts) != 3:
                 continue
-
             peer_sid, peer_port_str, peer_tag = parts
-
-            if peer_sid == SESSION_ID or peer_sid in seen_sids:
+            if peer_sid == SESSION_ID:
                 continue
-
             expected = _beacon_hmac(room_code, peer_sid)
             if not hmac.compare_digest(peer_tag, expected):
                 continue
-
             try:
                 peer_port = int(peer_port_str)
             except ValueError:
                 continue
-
-            seen_sids.add(peer_sid)
-            peer_key = (addr[0], peer_port)
-            if peer_key not in peers:
-                peers[peer_key] = addr
-                print(Fore.LIGHTGREEN_EX + Style.BRIGHT
-                      + f'  Found peer: {addr[0]}:{peer_port}')
-    finally:
-        # Unicast a final beacon to each discovered peer so they know we're here.
-        for peer_key, src_addr in peers.items():
             try:
-                disc.sendto(my_beacon, src_addr)
+                disc.sendto(my_beacon, addr)
             except Exception:
                 pass
+            return (addr[0], peer_port)
+    finally:
         disc.close()
-
-    return list(peers.keys())
+    return None
