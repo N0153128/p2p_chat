@@ -70,12 +70,10 @@ if __name__ == '__main__':
         'Pick a colour for your name:',
         prefs['name_colour'],
     )
-    print()
     text_colour_name, text_colour = pick_colour(
         'Pick a colour for your message text:',
         prefs['text_colour'],
     )
-    print()
 
     config.save(username, name_colour_name, text_colour_name)
 

@@ -175,8 +175,15 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
 # ---------------------------------------------------------------------------
 
 
+def _erase_lines(n):
+    """Move the cursor up *n* lines and erase each one."""
+    for _ in range(n):
+        sys.stdout.write('\x1b[1A\x1b[2K')
+    sys.stdout.flush()
+
+
 def pick_colour(prompt, default_name):
-    """Display a numbered colour menu and return ``(name, ansi_code)``.
+    """Display a numbered colour menu, erase it on selection, and return ``(name, ansi_code)``.
 
     Args:
         prompt:       Introductory line printed above the menu.
@@ -186,6 +193,10 @@ def pick_colour(prompt, default_name):
     Returns:
         ``(name, ansi_code)`` tuple from :data:`COLOURS`.
     """
+    # 1 prompt + len(COLOURS) colour rows + 1 input row
+    base_lines = 1 + len(COLOURS) + 1
+    extra_lines = 0  # error lines accumulate here
+
     sys.stdout.write(Style.BRIGHT + Fore.WHITE + prompt + Style.RESET_ALL + '\n')
     for i, (name, code) in enumerate(COLOURS, 1):
         sys.stdout.write(
@@ -196,10 +207,13 @@ def pick_colour(prompt, default_name):
     while True:
         raw = input(f'  Choose (1-{len(COLOURS)}, default {default_name}): ').strip()
         if not raw:
+            _erase_lines(base_lines + extra_lines)
             return default_name, colour_for(default_name)
         if raw.isdigit() and 1 <= int(raw) <= len(COLOURS):
+            _erase_lines(base_lines + extra_lines)
             return COLOURS[int(raw) - 1]
         sys.stdout.write(
             Fore.RED + f'  Enter a number between 1 and {len(COLOURS)}.\n' + Style.RESET_ALL
         )
         sys.stdout.flush()
+        extra_lines += 1
