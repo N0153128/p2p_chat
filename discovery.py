@@ -83,6 +83,53 @@ def _beacon_hmac(room_code, session_id):
     ).hexdigest()[:16]
 
 
+def scan_active_rooms(timeout=2.0):
+    """Listen on the discovery port and return the number of distinct active rooms.
+
+    Collects beacons for *timeout* seconds without broadcasting anything.
+    Each unique session ID is counted as one room.  Because beacons are
+    authenticated with the room code, we cannot read the room name — only
+    that a room exists.
+
+    Args:
+        timeout: How long to listen in seconds.
+
+    Returns:
+        Number of distinct rooms detected (int).
+    """
+    seen_sids = set()
+    try:
+        disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        disc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        disc.bind(('0.0.0.0', DISCOVERY_PORT))
+        disc.settimeout(0.2)
+    except OSError:
+        return 0
+
+    from time import time as _time
+    deadline = _time() + timeout
+    try:
+        while _time() < deadline:
+            try:
+                data, _ = disc.recvfrom(4096)
+            except (TimeoutError, socket.timeout):
+                continue
+            except OSError:
+                break
+            if not data.startswith(BEACON_PREFIX):
+                continue
+            payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
+            parts = payload.split(':')
+            if len(parts) != 3:
+                continue
+            peer_sid = parts[0]
+            if peer_sid != SESSION_ID:
+                seen_sids.add(peer_sid)
+    finally:
+        disc.close()
+    return len(seen_sids)
+
+
 def lan_discover(chat_port, room_code):
     """Broadcast authenticated beacons and return the first matching peer.
 

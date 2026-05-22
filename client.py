@@ -113,7 +113,22 @@ if __name__ == '__main__':
         try:
             mode = input('Mode (l/g): ').strip().lower()
             if mode == 'l':
-                room_code = input('Room code (share this with your peer): ').strip()
+                sys.stdout.write(Fore.CYAN + '  Scanning for active rooms...' + Style.RESET_ALL + '\r')
+                sys.stdout.flush()
+                room_count = discovery.scan_active_rooms(timeout=2.0)
+                sys.stdout.write('\x1b[2K')  # erase the scanning line
+                if room_count:
+                    sys.stdout.write(
+                        Fore.CYAN + Style.BRIGHT
+                        + f'  {room_count} active room{"s" if room_count != 1 else ""} on this network.\n'
+                        + Style.RESET_ALL
+                    )
+                else:
+                    sys.stdout.write(
+                        Fore.WHITE + '  No active rooms detected — you\'ll be the first.\n' + Style.RESET_ALL
+                    )
+                sys.stdout.flush()
+                room_code = input('Room code: ').strip()
                 if not room_code:
                     print('Room code cannot be empty.')
                     continue

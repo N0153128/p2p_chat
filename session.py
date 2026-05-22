@@ -149,8 +149,24 @@ class UDPClient:
         send_thread = threading.Thread(target=self._send_loop, daemon=True)
         send_thread.start()
 
+        ui.get_prompt = self._prompt
         self.done.wait()
+        ui.get_prompt = lambda: '> '
         signal.signal(signal.SIGINT, self._prev_sigint)
+
+    # ------------------------------------------------------------------
+    # Prompt
+    # ------------------------------------------------------------------
+
+    def _prompt(self):
+        """Return the current input prompt string including connected peer count."""
+        with self._peers_lock:
+            n = sum(1 for p in self._peers.values() if p['connected'].is_set())
+        label = f'{n} peer{"s" if n != 1 else ""}'
+        return (
+            Fore.CYAN + Style.BRIGHT + f'[{label}]'
+            + Style.RESET_ALL + ' > '
+        )
 
     # ------------------------------------------------------------------
     # Peer management
@@ -490,7 +506,7 @@ class UDPClient:
         try:
             while not self.done.is_set():
                 with print_lock:
-                    sys.stdout.write('> ')
+                    sys.stdout.write(self._prompt())
                     sys.stdout.flush()
                 msg = sys.stdin.readline().rstrip('\n')
                 if self.done.is_set():

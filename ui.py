@@ -83,7 +83,7 @@ _GREETING_PRESETS = [
         Fore.MAGENTA, Fore.GREEN,
     ),
     (
-        'isometric1',
+        'isometric3',
         [Fore.CYAN + Style.BRIGHT, Fore.BLUE + Style.BRIGHT,
          Fore.BLUE, Fore.MAGENTA, Fore.MAGENTA + Style.BRIGHT],
         Fore.CYAN, Fore.BLUE,
@@ -262,6 +262,10 @@ def _play_beep():
 # Output
 # ---------------------------------------------------------------------------
 
+# Session sets this to a callable that returns the current prompt string,
+# so incoming-message reprints stay in sync with the peer-count prompt.
+get_prompt = lambda: '> '  # noqa: E731
+
 
 def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE, alert=False):
     """Print an incoming chat message without clobbering the input prompt.
@@ -287,7 +291,7 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL + '\n'
         )
-        sys.stdout.write('> ')
+        sys.stdout.write(get_prompt())
         sys.stdout.flush()
 
 
