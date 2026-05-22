@@ -70,6 +70,7 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     c.room_name = ''
     c._tab_selected = -1
     c._banned_ips = set()
+    c._max_peers = 16
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
@@ -668,6 +669,7 @@ class TestMultiPeer:
         c.room_name = ''
         c._tab_selected = -1
         c._banned_ips = set()
+        c._max_peers = 16
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
@@ -730,6 +732,7 @@ class TestMultiPeer:
         c.room_name = ''
         c._tab_selected = -1
         c._banned_ips = set()
+        c._max_peers = 16
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)

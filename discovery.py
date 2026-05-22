@@ -94,9 +94,9 @@ def scan_active_rooms(timeout=2.0):
         timeout: How long to listen in seconds.
 
     Returns:
-        List of ``(sid, room_name, room_code, has_passcode)`` tuples.
+        List of ``(sid, room_name, room_code, has_passcode, max_peers)`` tuples.
         ``room_code`` is the raw room code string (needed to join).
-        ``has_passcode`` is a bool.
+        ``has_passcode`` is a bool.  ``max_peers`` is the room capacity.
     """
     import base64
     seen = {}  # sid -> (room_name, room_code, has_passcode)
@@ -144,10 +144,16 @@ def scan_active_rooms(timeout=2.0):
                         room_name = ''
                 if len(parts) >= 6:
                     has_passcode = parts[5] == '1'
-                seen[peer_sid] = (room_name, room_code, has_passcode)
+                max_peers = 32
+                if len(parts) >= 7:
+                    try:
+                        max_peers = int(parts[6])
+                    except ValueError:
+                        pass
+                seen[peer_sid] = (room_name, room_code, has_passcode, max_peers)
     finally:
         disc.close()
-    return [(sid, name, code, hp) for sid, (name, code, hp) in seen.items()]
+    return [(sid, name, code, hp, mp) for sid, (name, code, hp, mp) in seen.items()]
 
 
 def lan_discover(chat_port, room_code):

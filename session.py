@@ -105,6 +105,7 @@ class UDPClient:
         motd='',
         passcode='',
         banned_ips=None,
+        max_peers=MAX_PEERS,
     ):
         self.sock = sock
         self.username = username
@@ -118,6 +119,7 @@ class UDPClient:
         # joiners can read it and reconstruct the effective room code themselves.
         self._raw_room_code = room_code[:-len(':' + passcode)] if passcode else room_code
         self._banned_ips = banned_ips if banned_ips is not None else set()
+        self._max_peers = max(2, min(int(max_peers), MAX_PEERS))
         self._tab_selected = -1
         self._own_addr = sock.getsockname()
 
@@ -209,7 +211,7 @@ class UDPClient:
         with self._peers_lock:
             connected = [p for p in self._peers.values() if p['connected'].is_set()]
         total = 1 + len(connected)
-        capacity = MAX_PEERS
+        capacity = self._max_peers
         members = [self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL]
         for p in connected:
             name = p['username'] or '?'
@@ -304,7 +306,7 @@ class UDPClient:
         Returns True if the peer was newly added.
         """
         with self._peers_lock:
-            if addr in self._peers or len(self._peers) >= MAX_PEERS - 1:
+            if addr in self._peers or len(self._peers) >= self._max_peers - 1:
                 return False
             self._peers[addr] = {
                 'box': None,
@@ -436,7 +438,7 @@ class UDPClient:
         has_passcode_flag = '1' if self._passcode else '0'
         my_beacon = BEACON_PREFIX + (
             f'{discovery.SESSION_ID}:{chat_port}:{tag}'
-            f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}'
+            f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}:{self._max_peers}'
         ).encode()
         seen_sids = set()
 
@@ -494,7 +496,7 @@ class UDPClient:
 
                 with self._peers_lock:
                     already_known = peer_addr in self._peers
-                    full = len(self._peers) >= MAX_PEERS - 1
+                    full = len(self._peers) >= self._max_peers - 1
 
                 if already_known or full:
                     continue
@@ -555,7 +557,7 @@ class UDPClient:
 
             with self._peers_lock:
                 known = addr in self._peers
-                full = len(self._peers) >= MAX_PEERS - 1
+                full = len(self._peers) >= self._max_peers - 1
 
             # Accept PUNCH from unknown addresses: this is a late joiner
             # punching us first (common when we sent them a beacon reply).

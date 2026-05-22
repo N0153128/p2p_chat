@@ -127,12 +127,13 @@ if __name__ == '__main__':
                             + f'  {len(rooms)} active room{"s" if len(rooms) != 1 else ""} on this network:\n'
                             + Style.RESET_ALL
                         )
-                        for i, (sid, name, code, has_passcode) in enumerate(rooms, 1):
+                        for i, (sid, name, code, has_passcode, max_peers) in enumerate(rooms, 1):
                             label = name if name else '(unnamed)'
                             lock_icon = ' 🔒' if has_passcode else ''
                             sys.stdout.write(
                                 Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
-                                + Fore.WHITE + f'  {label}{lock_icon}\n' + Style.RESET_ALL
+                                + Fore.WHITE + f'  {label}{lock_icon}'
+                                + Fore.WHITE + Style.DIM + f'  [{max_peers} slots]\n' + Style.RESET_ALL
                             )
                         sys.stdout.write(
                             Fore.MAGENTA + Style.BRIGHT + '  0' + Style.RESET_ALL
@@ -148,7 +149,7 @@ if __name__ == '__main__':
                             choice = int(raw)
                             if 1 <= choice <= len(rooms):
                                 # --- Join an existing room ---
-                                sid, room_name, room_code, has_passcode = rooms[choice - 1]
+                                sid, room_name, room_code, has_passcode, max_peers = rooms[choice - 1]
                                 passcode = ''
                                 if has_passcode:
                                     passcode = input('  Passcode: ').strip()
@@ -162,6 +163,7 @@ if __name__ == '__main__':
                                     room_code=effective_room_code,
                                     chat_port=chat_port,
                                     room_name=room_name,
+                                    max_peers=max_peers,
                                 )
                                 break
                             elif choice == 0:
@@ -189,6 +191,12 @@ if __name__ == '__main__':
                         if room_name:
                             break
                         print('  Room name cannot be empty.')
+                    while True:
+                        raw_slots = input('  Slots (2–32): ').strip()
+                        if raw_slots.isdigit() and 2 <= int(raw_slots) <= 32:
+                            max_peers = int(raw_slots)
+                            break
+                        print('  Enter a number between 2 and 32.')
                     enable_host_str = input('  Enable host mode? (y/N): ').strip().lower()
                     is_host = enable_host_str == 'y'
                     passcode = ''
@@ -216,6 +224,7 @@ if __name__ == '__main__':
                         room_name=room_name,
                         motd=motd,
                         passcode=passcode,
+                        max_peers=max_peers,
                     )
                     break
             elif mode == 'g':
