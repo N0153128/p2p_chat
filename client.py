@@ -12,6 +12,8 @@ All business logic lives in the dedicated modules:
   session    — encrypted UDP chat session (UDPClient)
 """
 
+import os
+import random
 import socket
 import sys
 
@@ -117,52 +119,93 @@ if __name__ == '__main__':
                 sys.stdout.flush()
                 rooms = discovery.scan_active_rooms(timeout=2.0)
                 sys.stdout.write('\x1b[2K')  # erase the scanning line
+
+                # Build numbered list: index 1..N for existing rooms, 0 = create new.
                 if rooms:
                     sys.stdout.write(
                         Fore.CYAN + Style.BRIGHT
                         + f'  {len(rooms)} active room{"s" if len(rooms) != 1 else ""} on this network:\n'
                         + Style.RESET_ALL
                     )
-                    for sid, name in rooms:
+                    for i, (sid, name, code, has_passcode) in enumerate(rooms, 1):
                         label = name if name else '(unnamed)'
-                        sys.stdout.write(Fore.WHITE + f'    · {label}\n' + Style.RESET_ALL)
+                        lock_icon = ' 🔒' if has_passcode else ''
+                        sys.stdout.write(
+                            Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
+                            + Fore.WHITE + f'  {label}{lock_icon}\n' + Style.RESET_ALL
+                        )
+                    sys.stdout.write(
+                        Fore.MAGENTA + Style.BRIGHT + '  0' + Style.RESET_ALL
+                        + Fore.WHITE + Style.DIM + '  create a new room\n' + Style.RESET_ALL
+                    )
                 else:
                     sys.stdout.write(
-                        Fore.WHITE + '  No active rooms detected — you\'ll be the first.\n' + Style.RESET_ALL
+                        Fore.WHITE + '  No active rooms on this network.\n' + Style.RESET_ALL
                     )
                 sys.stdout.flush()
-                room_code = input('Room code: ').strip()
-                if not room_code:
-                    print('Room code cannot be empty.')
-                    continue
-                room_name = input('Room name (optional): ').strip()
-                enable_host_str = input('Enable host mode? (y/N): ').strip().lower()
-                is_host = enable_host_str == 'y'
-                passcode = ''
-                motd = ''
-                if is_host:
-                    passcode = input('Passcode (digits only, blank = open): ').strip()
-                    if passcode and not passcode.isdigit():
-                        print('Passcode must be digits only, ignoring.')
+
+                # Room selection.
+                while True:
+                    if rooms:
+                        raw = input(f'  Join room (1–{len(rooms)}) or 0 to create new: ').strip()
+                    else:
+                        raw = '0'  # no rooms found, skip straight to create
+                    if not raw.isdigit():
+                        print('  Enter a number.')
+                        continue
+                    choice = int(raw)
+                    if rooms and 1 <= choice <= len(rooms):
+                        # --- Join an existing room ---
+                        sid, room_name, room_code, has_passcode = rooms[choice - 1]
                         passcode = ''
-                    motd = input('Message of the day (optional): ').strip()
-                # Fold passcode into room_code for HMAC authentication.
-                effective_room_code = room_code + ':' + passcode if passcode else room_code
-                print(Fore.CYAN + Style.BRIGHT
-                      + 'Waiting for peers to join your room...'
-                      + Style.RESET_ALL)
-                UDPClient(
-                    sock,
-                    username=username,
-                    name_colour=name_colour,
-                    text_colour=text_colour,
-                    room_code=effective_room_code,
-                    chat_port=chat_port,
-                    is_host=is_host,
-                    room_name=room_name,
-                    motd=motd,
-                    passcode=passcode,
-                )
+                        if has_passcode:
+                            passcode = input('  Passcode: ').strip()
+                        effective_room_code = room_code + ':' + passcode if passcode else room_code
+                        print(Fore.CYAN + Style.BRIGHT + 'Joining room...' + Style.RESET_ALL)
+                        UDPClient(
+                            sock,
+                            username=username,
+                            name_colour=name_colour,
+                            text_colour=text_colour,
+                            room_code=effective_room_code,
+                            chat_port=chat_port,
+                            room_name=room_name,
+                        )
+                        break
+                    elif choice == 0:
+                        # --- Create a new room ---
+                        room_name = input('  Room name (optional): ').strip()
+                        enable_host_str = input('  Enable host mode? (y/N): ').strip().lower()
+                        is_host = enable_host_str == 'y'
+                        passcode = ''
+                        motd = ''
+                        if is_host:
+                            passcode = input('  Passcode (digits only, blank = open): ').strip()
+                            if passcode and not passcode.isdigit():
+                                print('  Passcode must be digits only, ignoring.')
+                                passcode = ''
+                            motd = input('  Message of the day (optional): ').strip()
+                        # Generate a random internal room code — users never see this.
+                        room_code = '%016x' % random.getrandbits(64)
+                        effective_room_code = room_code + ':' + passcode if passcode else room_code
+                        print(Fore.CYAN + Style.BRIGHT
+                              + 'Waiting for peers to join your room...'
+                              + Style.RESET_ALL)
+                        UDPClient(
+                            sock,
+                            username=username,
+                            name_colour=name_colour,
+                            text_colour=text_colour,
+                            room_code=effective_room_code,
+                            chat_port=chat_port,
+                            is_host=is_host,
+                            room_name=room_name,
+                            motd=motd,
+                            passcode=passcode,
+                        )
+                        break
+                    else:
+                        print(f'  Enter a number between 0 and {len(rooms)}.')
             elif mode == 'g':
                 peer_ip = input("Peer's public IP: ").strip()
                 if not peer_ip:

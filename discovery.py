@@ -84,21 +84,22 @@ def _beacon_hmac(room_code, session_id):
 
 
 def scan_active_rooms(timeout=2.0):
-    """Listen on the discovery port and return a list of distinct active rooms.
+    """Listen on the discovery port and return info about distinct active rooms.
 
     Collects beacons for *timeout* seconds without broadcasting anything.
-    Each unique session ID is counted as one room.  The room name is decoded
-    from the beacon if present (new 4-part format); old 3-part beacons show
-    an empty name.
+    Supports the extended beacon format:
+      <sid>:<port>:<hmac>:<room_code_b64>:<room_name_b64>:<has_passcode>
 
     Args:
         timeout: How long to listen in seconds.
 
     Returns:
-        List of ``(sid, room_name)`` tuples for each distinct room detected.
+        List of ``(sid, room_name, room_code, has_passcode)`` tuples.
+        ``room_code`` is the raw room code string (needed to join).
+        ``has_passcode`` is a bool.
     """
     import base64
-    seen = {}  # sid -> room_name
+    seen = {}  # sid -> (room_name, room_code, has_passcode)
     try:
         disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         disc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -121,23 +122,32 @@ def scan_active_rooms(timeout=2.0):
                 continue
             payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
             parts = payload.split(':')
-            # Accept 3-part (old) or 4-part (new, with room_name_b64).
             if len(parts) < 3:
                 continue
             peer_sid = parts[0]
             if peer_sid == SESSION_ID:
                 continue
             if peer_sid not in seen:
+                room_code = ''
                 room_name = ''
+                has_passcode = False
+                # Extended format: sid:port:hmac:room_code_b64:room_name_b64:has_passcode
                 if len(parts) >= 4 and parts[3]:
                     try:
-                        room_name = base64.urlsafe_b64decode(parts[3] + '==').decode('utf-8', errors='replace')
+                        room_code = base64.urlsafe_b64decode(parts[3] + '==').decode('utf-8', errors='replace')
+                    except Exception:
+                        room_code = ''
+                if len(parts) >= 5 and parts[4]:
+                    try:
+                        room_name = base64.urlsafe_b64decode(parts[4] + '==').decode('utf-8', errors='replace')
                     except Exception:
                         room_name = ''
-                seen[peer_sid] = room_name
+                if len(parts) >= 6:
+                    has_passcode = parts[5] == '1'
+                seen[peer_sid] = (room_name, room_code, has_passcode)
     finally:
         disc.close()
-    return list(seen.items())
+    return [(sid, name, code, hp) for sid, (name, code, hp) in seen.items()]
 
 
 def lan_discover(chat_port, room_code):

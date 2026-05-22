@@ -416,9 +416,16 @@ class UDPClient:
         import socket as socklib
 
         tag = discovery._beacon_hmac(room_code, discovery.SESSION_ID)
-        # Embed room_name as base64 in the beacon (informational, not authenticated).
+        # Embed room_code and room_name as base64 so joiners can discover and
+        # connect without knowing the code upfront.  has_passcode signals that
+        # a passcode prompt is required before the session is accepted.
+        room_code_b64 = base64.urlsafe_b64encode(room_code.encode()).decode()
         room_name_b64 = base64.urlsafe_b64encode(self.room_name.encode()).decode() if self.room_name else ''
-        my_beacon = BEACON_PREFIX + f'{discovery.SESSION_ID}:{chat_port}:{tag}:{room_name_b64}'.encode()
+        has_passcode_flag = '1' if self._passcode else '0'
+        my_beacon = BEACON_PREFIX + (
+            f'{discovery.SESSION_ID}:{chat_port}:{tag}'
+            f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}'
+        ).encode()
         seen_sids = set()
 
         try:
