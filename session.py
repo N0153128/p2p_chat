@@ -214,8 +214,11 @@ class UDPClient:
         capacity = self._max_peers
         members = [self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL]
         for p in connected:
-            name = p['username'] or '?'
-            members.append(p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL)
+            name = p['username']
+            if name:
+                members.append(p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL)
+            else:
+                members.append(Fore.WHITE + Style.DIM + '...' + Style.RESET_ALL)
 
         # Apply tab-select highlight to the selected peer (index into connected list).
         tab_idx = self._tab_selected
@@ -224,7 +227,7 @@ class UDPClient:
             # Rebuild the selected peer's entry with inverse-video highlight.
             # Index 0 in members is ourselves; peers start at index 1.
             peer_member_idx = tab_idx + 1
-            name = connected[tab_idx]['username'] or '?'
+            name = connected[tab_idx]['username'] or '...'
             from colorama import Back
             members[peer_member_idx] = (
                 Fore.BLACK + Back.WHITE + ' ' + name + ' ' + Style.RESET_ALL

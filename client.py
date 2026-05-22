@@ -43,18 +43,33 @@ def _get_local_ip():
 
 
 def _prompt_with_default(prompt, default):
-    """Show *prompt*, return *default* if the user presses Enter without input.
-
-    Args:
-        prompt:  Text shown to the user (should not include the default hint,
-                 that is appended automatically).
-        default: Value returned on empty input.
-
-    Returns:
-        Stripped string — either what the user typed or *default*.
-    """
+    """Show *prompt*, return *default* if the user presses Enter without input."""
     raw = input(f'{prompt} [{default}]: ').strip()
     return raw if raw else default
+
+
+def _field(emoji, label, hint=''):
+    """Print a styled field label and return the input prompt string."""
+    hint_str = Fore.WHITE + Style.DIM + f'  {hint}' + Style.RESET_ALL if hint else ''
+    sys.stdout.write(
+        Fore.CYAN + Style.BRIGHT + f'  {emoji}  ' + Style.RESET_ALL
+        + Fore.WHITE + Style.BRIGHT + label + Style.RESET_ALL
+        + hint_str + '\n'
+    )
+    sys.stdout.flush()
+    return Fore.CYAN + '     › ' + Style.RESET_ALL
+
+
+def _section(title):
+    """Print a coloured section divider."""
+    cols = __import__('shutil').get_terminal_size(fallback=(80, 24)).columns
+    line = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
+    sys.stdout.write(
+        line + '\n'
+        + Fore.YELLOW + Style.BRIGHT + f'  {title}\n' + Style.RESET_ALL
+        + line + '\n'
+    )
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':
@@ -152,7 +167,7 @@ if __name__ == '__main__':
                                 sid, room_name, room_code, has_passcode, max_peers = rooms[choice - 1]
                                 passcode = ''
                                 if has_passcode:
-                                    passcode = input('  Passcode: ').strip()
+                                    passcode = input(Fore.CYAN + '  🔒 Passcode: ' + Style.RESET_ALL).strip()
                                 effective_room_code = room_code + ':' + passcode if passcode else room_code
                                 print(Fore.CYAN + Style.BRIGHT + 'Joining room...' + Style.RESET_ALL)
                                 UDPClient(
@@ -177,42 +192,73 @@ if __name__ == '__main__':
                         # choice == 0: fall through to create flow
                     else:
                         sys.stdout.write(
-                            Fore.WHITE + '  No active rooms on this network.\n' + Style.RESET_ALL
+                            Fore.YELLOW + Style.BRIGHT + '  ⊘  No active rooms on this network.\n' + Style.RESET_ALL
                         )
                         sys.stdout.flush()
-                        action = input('  Create a new room (c) or re-scan (r)? ').strip().lower()
+                        action = input(
+                            Fore.CYAN + '  › ' + Style.RESET_ALL
+                            + Fore.WHITE + 'Create a room ' + Style.RESET_ALL
+                            + Fore.WHITE + Style.DIM + '(c)' + Style.RESET_ALL
+                            + Fore.WHITE + ' or re-scan ' + Style.RESET_ALL
+                            + Fore.WHITE + Style.DIM + '(r)' + Style.RESET_ALL
+                            + Fore.CYAN + ': ' + Style.RESET_ALL
+                        ).strip().lower()
                         if action == 'r':
                             continue  # re-scan
                         # anything else → create
 
                     # --- Create a new room ---
+                    _section('✦  Create a Room')
+
+                    _field('🏷️', 'Room name')
                     while True:
-                        room_name = input('  Room name: ').strip()
+                        room_name = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
                         if room_name:
                             break
-                        print('  Room name cannot be empty.')
+                        sys.stdout.write(Fore.RED + '  ✖  Name cannot be empty.\n' + Style.RESET_ALL)
+                        sys.stdout.flush()
+
+                    _field('👥', 'Slots', 'max 32 — how many people can join')
                     while True:
-                        raw_slots = input('  Slots (2–32): ').strip()
+                        raw_slots = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
                         if raw_slots.isdigit() and 2 <= int(raw_slots) <= 32:
                             max_peers = int(raw_slots)
                             break
-                        print('  Enter a number between 2 and 32.')
-                    enable_host_str = input('  Enable host mode? (y/N): ').strip().lower()
+                        sys.stdout.write(Fore.RED + '  ✖  Enter a number between 2 and 32.\n' + Style.RESET_ALL)
+                        sys.stdout.flush()
+
+                    _field('👑', 'Host mode?', 'y = you control kicks, bans and MOTD  /  n = open room')
+                    enable_host_str = input(Fore.CYAN + '     › (y/N) ' + Style.RESET_ALL).strip().lower()
                     is_host = enable_host_str == 'y'
+
                     passcode = ''
                     motd = ''
                     if is_host:
-                        passcode = input('  Passcode (digits only, blank = open): ').strip()
-                        if passcode and not passcode.isdigit():
-                            print('  Passcode must be digits only, ignoring.')
-                            passcode = ''
-                        motd = input('  Message of the day: ').strip()
+                        _field('🔒', 'Passcode', 'digits only — leave blank for an open room')
+                        while True:
+                            raw_pc = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            if not raw_pc:
+                                break
+                            if raw_pc.isdigit():
+                                passcode = raw_pc
+                                break
+                            sys.stdout.write(Fore.RED + '  ✖  Digits only (or leave blank).\n' + Style.RESET_ALL)
+                            sys.stdout.flush()
+
+                        _field('📢', 'Message of the day', 'shown to everyone when they join')
+                        motd = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+
                     # Generate a random internal room code — users never see this.
                     room_code = '%016x' % random.getrandbits(64)
                     effective_room_code = room_code + ':' + passcode if passcode else room_code
-                    print(Fore.CYAN + Style.BRIGHT
-                          + 'Waiting for peers to join your room...'
-                          + Style.RESET_ALL)
+
+                    sys.stdout.write(
+                        '\n'
+                        + Fore.GREEN + Style.BRIGHT + '  ✔  Room created!' + Style.RESET_ALL
+                        + Fore.WHITE + Style.DIM + '  Waiting for peers to join...\n' + Style.RESET_ALL
+                    )
+                    sys.stdout.flush()
+
                     UDPClient(
                         sock,
                         username=username,
