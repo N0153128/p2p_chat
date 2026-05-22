@@ -150,10 +150,10 @@ class UDPClient:
             for addr in (peers or []):
                 self._add_peer(addr)
 
-        # In LAN mode, wait indefinitely — the discovery loop runs forever
-        # and a peer may join at any time.  In internet mode, give up after
-        # PUNCH_TIMEOUT seconds if the explicit peer list never connects.
-        timeout = None if (room_code and chat_port) else PUNCH_TIMEOUT
+        # Host waits indefinitely — discovery runs for the life of the room.
+        # Joiners (LAN or internet) time out if they can't reach the host.
+        lan_mode = bool(room_code and chat_port)
+        timeout = None if (lan_mode and self.is_host) else PUNCH_TIMEOUT
         if not self._first_connected.wait(timeout=timeout):
             with print_lock:
                 print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
