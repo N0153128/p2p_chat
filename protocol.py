@@ -105,3 +105,6 @@ CTRL_PASSCODE_OK = b'__passcode_ok__'
 
 CTRL_PASSCODE_FAIL = b'__passcode_fail__'
 """Encrypted control message: passcode verification failed."""
+
+CTRL_ROOM_CLOSED = b'__room_closed__'
+"""Encrypted control message sent by host to all peers when closing the room."""

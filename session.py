@@ -65,6 +65,7 @@ from protocol import (
     CTRL_KICK_PREFIX,
     CTRL_META_PREFIX,
     CTRL_MOTD_PREFIX,
+    CTRL_ROOM_CLOSED,
     MAX_PEERS,
     PUNCH_ACK_PREFIX,
     PUNCH_BAN,
@@ -685,6 +686,12 @@ class UDPClient:
                 self.done.set()
                 continue
 
+            if plaintext == CTRL_ROOM_CLOSED:
+                ui.print_msg('', Fore.RED + Style.BRIGHT + 'The host closed the room.' + Style.RESET_ALL,
+                             name_colour='', text_colour='')
+                self.done.set()
+                continue
+
             if plaintext.startswith(CTRL_MOTD_PREFIX):
                 motd = plaintext[len(CTRL_MOTD_PREFIX):].decode('utf-8', errors='replace')
                 ui.print_msg('', f'📢 MOTD: {motd}',
@@ -876,6 +883,17 @@ class UDPClient:
                         ui._paint_panel()
                         sys.stdout.flush()
                     continue
+                if msg == '/close' and self.is_host:
+                    self._broadcast(CTRL_ROOM_CLOSED)
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(
+                            Fore.RED + Style.BRIGHT
+                            + 'Room closed.\n' + Style.RESET_ALL
+                        )
+                        sys.stdout.flush()
+                    self.done.set()
+                    break
                 if msg:
                     self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))
                     ui.print_msg(
