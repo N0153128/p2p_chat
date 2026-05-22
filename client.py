@@ -10,8 +10,14 @@ All business logic lives in the dedicated modules:
   discovery  — LAN peer discovery via authenticated UDP broadcast
   ui         — colour palette, terminal output, startup colour picker
   session    — encrypted UDP chat session (UDPClient)
+
+Flags
+-----
+-a / --anonymous   Hide your public and local IP everywhere in the UI.
+                   Your port is still shown so peers can connect.
 """
 
+import argparse
 import os
 import random
 import socket
@@ -73,6 +79,11 @@ def _section(title):
 
 
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('-a', '--anonymous', action='store_true')
+    args, _ = parser.parse_known_args()
+    anonymous = args.anonymous
+
     show_greeting()
 
     prefs = config.load()
@@ -106,9 +117,10 @@ if __name__ == '__main__':
 
     ext_ip, _ = stun.get_external_address(sock)
 
+    display_ip = '***.***.***.***' if anonymous else (ext_ip or 'unavailable')
     sys.stdout.write(
         Fore.CYAN + Style.BRIGHT + '  public IP  ' + Style.RESET_ALL
-        + Fore.WHITE + Style.BRIGHT + (ext_ip or 'unavailable') + Style.RESET_ALL + '\n'
+        + Fore.WHITE + Style.BRIGHT + display_ip + Style.RESET_ALL + '\n'
     )
     sys.stdout.write(
         Fore.CYAN + Style.BRIGHT + '  chat port  ' + Style.RESET_ALL
@@ -179,6 +191,7 @@ if __name__ == '__main__':
                                     chat_port=chat_port,
                                     room_name=room_name,
                                     max_peers=max_peers,
+                                    anonymous=anonymous,
                                 )
                                 break
                             elif choice == 0:
@@ -271,6 +284,7 @@ if __name__ == '__main__':
                         motd=motd,
                         passcode=passcode,
                         max_peers=max_peers,
+                        anonymous=anonymous,
                     )
                     break
             elif mode == 'g':
@@ -278,15 +292,20 @@ if __name__ == '__main__':
                 if not peer_ip:
                     continue
                 peer_port = int(input("Peer's port: ").strip())
-                print(Fore.CYAN + Style.BRIGHT
-                      + 'Connecting... others can join by entering your IP and port above.'
-                      + Style.RESET_ALL)
+                if anonymous:
+                    print(Fore.CYAN + Style.BRIGHT
+                          + 'Connecting...' + Style.RESET_ALL)
+                else:
+                    print(Fore.CYAN + Style.BRIGHT
+                          + 'Connecting... others can join by entering your IP and port above.'
+                          + Style.RESET_ALL)
                 UDPClient(
                     sock,
                     username=username,
                     name_colour=name_colour,
                     text_colour=text_colour,
                     peers=[(peer_ip, peer_port)],
+                    anonymous=anonymous,
                 )
             else:
                 print('Enter l or g.')

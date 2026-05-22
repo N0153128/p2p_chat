@@ -107,6 +107,7 @@ class UDPClient:
         passcode='',
         banned_ips=None,
         max_peers=MAX_PEERS,
+        anonymous=False,
     ):
         self.sock = sock
         self.username = username
@@ -115,6 +116,7 @@ class UDPClient:
         self.is_host = is_host
         self.room_name = room_name
         self.motd = motd
+        self.anonymous = anonymous
         self._passcode = passcode
         # Raw token without the passcode suffix — embedded in beacons so
         # joiners can read it and reconstruct the effective room code themselves.
@@ -258,7 +260,7 @@ class UDPClient:
             peer = self._peers.get(addr)
         if peer is None:
             return
-        username = peer.get('username') or str(addr)
+        username = peer.get('username') or (f'***:{addr[1]}' if self.anonymous else str(addr))
         box = peer.get('box')
         if box:
             try:
@@ -281,7 +283,7 @@ class UDPClient:
             peer = self._peers.get(addr)
         if peer is None:
             return
-        username = peer.get('username') or str(addr)
+        username = peer.get('username') or (f'***:{addr[1]}' if self.anonymous else str(addr))
         box = peer.get('box')
         if box:
             try:
@@ -586,11 +588,12 @@ class UDPClient:
                     peer['connected'].set()
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
+                    peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
+                            + f'Peer joined! ({peer_display}, encrypted)\n'
                             + Style.RESET_ALL
                         )
                         ui._paint_panel()
@@ -608,11 +611,12 @@ class UDPClient:
                     peer['connected'].set()
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
+                    peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
+                            + f'Peer joined! ({peer_display}, encrypted)\n'
                             + Style.RESET_ALL
                         )
                         ui._paint_panel()
