@@ -1,19 +1,23 @@
 # p2p_chat
 
-Serverless encrypted peer-to-peer chat over UDP. Works on local networks and across the internet via NAT hole-punching. Up to 16 people can share a single room.
+Serverless encrypted peer-to-peer chat over UDP. Works on local networks and across the internet via NAT hole-punching. Up to 32 people can share a single room.
 
 ## Features
 
 - End-to-end encrypted (X25519 + XSalsa20-Poly1305 via PyNaCl)
-- LAN auto-discovery — no IP addresses to copy; peers join live as they enter the room code
+- LAN auto-discovery — no IP addresses to copy; peers find each other automatically
 - Internet mode — direct peer-to-peer via UDP hole-punching
-- Up to 16 peers in a single room simultaneously
+- Up to 32 peers in a single room simultaneously
+- Named rooms with optional passcode protection
+- Host mode — one peer controls kicks, bans, slot count, and the message of the day (MOTD)
+- Anonymous mode — hide your IP address everywhere in the UI (`-a` / `--anonymous`)
 - Custom colours for your username and message text (saved between sessions)
-- Local echo of sent messages with a `(you)` prefix in your own colours
 - Peer colours transmitted at handshake — each peer's messages appear in their chosen colours
+- Local echo of sent messages with a `(you)` prefix in your own colours
+- Status bar showing all connected members and room capacity
+- Tab key cycles through peers in the status bar (host: press `k` to kick, `B` to ban)
 - Notification sound on incoming messages (via `paplay` / `aplay`)
-- Colourful terminal greeting with ASCII-art title in green→red gradient
-- Colour picker menus erase themselves after selection
+- Colourful terminal greeting with ASCII-art title
 
 ## Requirements
 
@@ -31,16 +35,38 @@ python3 client.py
 
 On startup a greeting screen is displayed, then you are prompted for your name and two colour choices (one for your username, one for your message text). Preferences are saved to `~/.p2p_chat.json` and pre-filled on the next run.
 
+### Anonymous mode
+
+```
+python3 client.py -a
+python3 client.py --anonymous
+```
+
+Your public IP is replaced with `***.***.***.***` everywhere it would appear — in your own terminal and in any join/kick/ban notifications shown to other peers. Your port is still displayed so peers can connect.
+
 ### Local network (LAN)
 
-Choose **l** and enter a room code. Discovery runs continuously in the background for the life of the room — new peers join automatically as they enter the same code, without interrupting the chat.
+Choose **l**. The app scans for active rooms on the network and lists them. Pick a numbered room to join, or enter **0** to create a new one.
 
 ```
 Mode (l/g): l
-Room code (share this with your peer): mysecretroom
+  2 active rooms on this network:
+  1  Friday hangout 🔒  [8 slots]
+  2  dev chat           [4 slots]
+  0  create a new room
 ```
 
-The room stays open after a peer disconnects. Remaining peers keep chatting; the disconnected peer can rejoin at any time with the same code.
+Locked rooms (🔒) require a passcode. Discovery runs continuously in the background — new peers join automatically without interrupting the chat, and the room stays open after a peer disconnects.
+
+#### Creating a room
+
+When no rooms are found, or when you choose **0**, you are walked through a short setup:
+
+- **Room name** — shown to everyone scanning the network
+- **Slots** — how many people can join (2–32)
+- **Host mode** — grants you kick, ban, passcode, and MOTD controls
+- **Passcode** (host only) — digits only; leave blank for an open room
+- **Message of the day** (host only) — shown to every peer on join
 
 ### Internet (global)
 
@@ -54,13 +80,16 @@ Peer's port: 51234
 
 ## Commands
 
-These can be typed at the `> ` prompt during a chat session:
+These can be typed at the input prompt during a chat session:
 
-| Command | Effect |
-|---------|--------|
-| `/exit` | Leave the room and return to mode selection. Sends a disconnect notice to all peers. |
-| `/mute` | Silence incoming notification sounds from all peers (for you only). |
-| `/unmute` | Restore notification sounds from all peers. |
+| Command | Who | Effect |
+|---------|-----|--------|
+| `/exit` | everyone | Leave the room. Sends a disconnect notice to all peers. |
+| `/clear` | everyone | Clear the local chat scroll region (no effect on other peers). |
+| `/mute` | everyone | Silence incoming notification sounds (for you only). |
+| `/unmute` | everyone | Restore notification sounds. |
+| `/motd <text>` | host only | Update the message of the day and broadcast it to all peers. |
+| `/close` | host only | Close the room, force-disconnecting all peers immediately. |
 
 ## Running tests
 
@@ -75,3 +104,4 @@ python3 -m pytest tests/
 | Beacon hijacking | HMAC-SHA256 ties each beacon to the shared room code |
 | Plaintext traffic | All chat is encrypted with a per-session `nacl.public.Box` per peer |
 | Control message injection | Only authenticated peers' packets are processed; unknown sources are dropped except for initial PUNCH handshakes |
+| Banned peer rejoin | Host sends an unencrypted rejection packet immediately on reconnect attempt, before any handshake |
