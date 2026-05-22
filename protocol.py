@@ -51,6 +51,14 @@ Prefix for hole-punch probe packets (unencrypted).
 Full format: ``__punch__:<64-hex-char-x25519-pubkey>``
 """
 
+PUNCH_BAN = b'__banned__'
+"""
+Unencrypted rejection sent by the host to a banned peer's PUNCH packet.
+
+Received before any handshake so the joiner can show an immediate ban
+message without waiting for PUNCH_TIMEOUT to expire.
+"""
+
 PUNCH_ACK_PREFIX = b'__punch_ack__:'
 """
 Prefix for hole-punch acknowledgement packets (unencrypted).

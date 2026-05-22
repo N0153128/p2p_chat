@@ -67,6 +67,7 @@ from protocol import (
     CTRL_MOTD_PREFIX,
     MAX_PEERS,
     PUNCH_ACK_PREFIX,
+    PUNCH_BAN,
     PUNCH_INTERVAL,
     PUNCH_PREFIX,
     PUNCH_TIMEOUT,
@@ -162,6 +163,12 @@ class UDPClient:
                 print(Fore.LIGHTRED_EX + Style.BRIGHT + 'Could not connect: timed out.')
                 print('Your peer may be behind Symmetric NAT, or started too late.')
             self.done.set()
+            signal.signal(signal.SIGINT, self._prev_sigint)
+            return
+
+        # _first_connected may have been set by a ban rejection rather than a
+        # real handshake — bail out before enabling the UI.
+        if self.done.is_set():
             signal.signal(signal.SIGINT, self._prev_sigint)
             return
 
@@ -523,8 +530,27 @@ class UDPClient:
             if addr == self._own_addr:
                 continue
 
-            # Drop packets from banned IPs.
+            # Banned IP: send an unencrypted rejection so the joiner knows
+            # immediately rather than waiting for PUNCH_TIMEOUT to expire.
             if addr[0] in self._banned_ips:
+                if data.startswith(PUNCH_PREFIX):
+                    try:
+                        self.sock.sendto(PUNCH_BAN, addr)
+                    except Exception:
+                        pass
+                continue
+
+            # Joiner side: host sent PUNCH_BAN before any handshake.
+            if data == PUNCH_BAN:
+                with print_lock:
+                    sys.stdout.write(
+                        '\n' + Fore.RED + Style.BRIGHT
+                        + 'You are banned from this room.\n'
+                        + Style.RESET_ALL
+                    )
+                    sys.stdout.flush()
+                self.done.set()
+                self._first_connected.set()  # unblock __init__ so it exits cleanly
                 continue
 
             with self._peers_lock:
