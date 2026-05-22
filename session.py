@@ -113,6 +113,9 @@ class UDPClient:
         self.room_name = room_name
         self.motd = motd
         self._passcode = passcode
+        # Raw token without the passcode suffix — embedded in beacons so
+        # joiners can read it and reconstruct the effective room code themselves.
+        self._raw_room_code = room_code[:-len(':' + passcode)] if passcode else room_code
         self._banned_ips = banned_ips if banned_ips is not None else set()
         self._tab_selected = -1
         self._own_addr = sock.getsockname()
@@ -419,7 +422,9 @@ class UDPClient:
         # Embed room_code and room_name as base64 so joiners can discover and
         # connect without knowing the code upfront.  has_passcode signals that
         # a passcode prompt is required before the session is accepted.
-        room_code_b64 = base64.urlsafe_b64encode(room_code.encode()).decode()
+        # Embed only the raw token (no passcode suffix) so joiners can read it
+        # and reconstruct effective_room_code = raw_token + ':' + passcode.
+        room_code_b64 = base64.urlsafe_b64encode(self._raw_room_code.encode()).decode()
         room_name_b64 = base64.urlsafe_b64encode(self.room_name.encode()).decode() if self.room_name else ''
         has_passcode_flag = '1' if self._passcode else '0'
         my_beacon = BEACON_PREFIX + (
