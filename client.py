@@ -26,6 +26,7 @@ import sys
 from colorama import Fore, Style
 
 import config
+import db
 import discovery
 import stun
 from session import UDPClient
@@ -76,6 +77,42 @@ def _section(title):
         + line + '\n'
     )
     sys.stdout.flush()
+
+
+def _pick_preset():
+    """Show saved room presets and return the chosen one, or None if cancelled.
+
+    Returns:
+        A preset dict (keys: name, slots, is_host, passcode) or None.
+    """
+    presets = db.load_room_presets()
+    if not presets:
+        sys.stdout.write(Fore.YELLOW + Style.BRIGHT + '  ⊘  No saved presets.\n' + Style.RESET_ALL)
+        sys.stdout.flush()
+        return None
+
+    _section('📋  Room Presets')
+    for i, p in enumerate(presets, 1):
+        lock_icon = ' 🔒' if p['passcode'] else ''
+        host_icon = ' 👑' if p['is_host'] else ''
+        sys.stdout.write(
+            Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
+            + Fore.WHITE + f'  {p["name"]}{lock_icon}{host_icon}'
+            + Fore.WHITE + Style.DIM + f'  [{p["slots"]} slots]\n' + Style.RESET_ALL
+        )
+    sys.stdout.flush()
+
+    while True:
+        raw = input(f'  Choose preset (1–{len(presets)}) or 0 to cancel: ').strip()
+        if not raw.isdigit():
+            print('  Enter a number.')
+            continue
+        choice = int(raw)
+        if choice == 0:
+            return None
+        if 1 <= choice <= len(presets):
+            return presets[choice - 1]
+        print(f'  Enter a number between 0 and {len(presets)}.')
 
 
 if __name__ == '__main__':
@@ -166,12 +203,19 @@ if __name__ == '__main__':
                             Fore.MAGENTA + Style.BRIGHT + '  0' + Style.RESET_ALL
                             + Fore.WHITE + Style.DIM + '  create a new room\n' + Style.RESET_ALL
                         )
+                        sys.stdout.write(
+                            Fore.MAGENTA + Style.BRIGHT + '  p' + Style.RESET_ALL
+                            + Fore.WHITE + Style.DIM + '  create from preset\n' + Style.RESET_ALL
+                        )
                         sys.stdout.flush()
 
                         while True:
-                            raw = input(f'  Join room (1–{len(rooms)}) or 0 to create new: ').strip()
+                            raw = input(f'  Join room (1–{len(rooms)}), 0 to create, p for preset: ').strip().lower()
+                            if raw == 'p':
+                                choice = 'p'
+                                break
                             if not raw.isdigit():
-                                print('  Enter a number.')
+                                print('  Enter a number or p.')
                                 continue
                             choice = int(raw)
                             if 1 <= choice <= len(rooms):
@@ -197,12 +241,12 @@ if __name__ == '__main__':
                             elif choice == 0:
                                 break  # fall through to create flow below
                             else:
-                                print(f'  Enter a number between 0 and {len(rooms)}.')
+                                print(f'  Enter a number between 0 and {len(rooms)}, or p.')
                         else:
                             break  # inner while exited normally (joined) — exit outer while
-                        if choice != 0:
+                        if choice not in (0, 'p'):
                             break  # joined a room, exit the scan loop
-                        # choice == 0: fall through to create flow
+                        # choice == 0 or 'p': fall through to create/preset flow
                     else:
                         sys.stdout.write(
                             Fore.YELLOW + Style.BRIGHT + '  ⊘  No active rooms on this network.\n' + Style.RESET_ALL
@@ -212,56 +256,69 @@ if __name__ == '__main__':
                             Fore.CYAN + '  › ' + Style.RESET_ALL
                             + Fore.WHITE + 'Create a room ' + Style.RESET_ALL
                             + Fore.WHITE + Style.DIM + '(c)' + Style.RESET_ALL
-                            + Fore.WHITE + ' or re-scan ' + Style.RESET_ALL
+                            + Fore.WHITE + ', use a preset ' + Style.RESET_ALL
+                            + Fore.WHITE + Style.DIM + '(p)' + Style.RESET_ALL
+                            + Fore.WHITE + ', or re-scan ' + Style.RESET_ALL
                             + Fore.WHITE + Style.DIM + '(r)' + Style.RESET_ALL
                             + Fore.CYAN + ': ' + Style.RESET_ALL
                         ).strip().lower()
                         if action == 'r':
                             continue  # re-scan
-                        # anything else → create
+                        choice = 'p' if action == 'p' else 0
 
-                    # --- Create a new room ---
-                    _section('✦  Create a Room')
+                    # --- Preset flow ---
+                    if choice == 'p':
+                        preset = _pick_preset()
+                        if preset is None:
+                            continue  # cancelled — re-scan
+                        room_name = preset['name']
+                        max_peers = preset['slots']
+                        is_host = preset['is_host']
+                        passcode = preset['passcode']
+                        motd = ''
+                    else:
+                        # --- Create a new room ---
+                        _section('✦  Create a Room')
 
-                    _field('🏷️', 'Room name')
-                    while True:
-                        room_name = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
-                        if room_name:
-                            break
-                        sys.stdout.write(Fore.RED + '  ✖  Name cannot be empty.\n' + Style.RESET_ALL)
-                        sys.stdout.flush()
-
-                    _field('👥', 'Slots', 'max 32 — how many people can join')
-                    while True:
-                        raw_slots = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
-                        if raw_slots.isdigit() and 2 <= int(raw_slots) <= 32:
-                            max_peers = int(raw_slots)
-                            break
-                        sys.stdout.write(Fore.RED + '  ✖  Enter a number between 2 and 32.\n' + Style.RESET_ALL)
-                        sys.stdout.flush()
-
-                    _field('👑', 'Host mode?', 'y = you control kicks, bans and MOTD  /  n = open room')
-                    enable_host_str = input(Fore.CYAN + '     › (y/N) ' + Style.RESET_ALL).strip().lower()
-                    is_host = enable_host_str == 'y'
-
-                    passcode = ''
-                    motd = ''
-                    if is_host:
-                        _field('🔒', 'Passcode', 'digits only — leave blank for an open room')
+                        _field('🏷️', 'Room name')
                         while True:
-                            raw_pc = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
-                            if not raw_pc:
+                            room_name = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            if room_name:
                                 break
-                            if raw_pc.isdigit():
-                                passcode = raw_pc
-                                break
-                            sys.stdout.write(Fore.RED + '  ✖  Digits only (or leave blank).\n' + Style.RESET_ALL)
+                            sys.stdout.write(Fore.RED + '  ✖  Name cannot be empty.\n' + Style.RESET_ALL)
                             sys.stdout.flush()
 
-                        _field('📢', 'Message of the day', 'shown to everyone when they join')
-                        motd = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                        _field('👥', 'Slots', 'max 32 — how many people can join')
+                        while True:
+                            raw_slots = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            if raw_slots.isdigit() and 2 <= int(raw_slots) <= 32:
+                                max_peers = int(raw_slots)
+                                break
+                            sys.stdout.write(Fore.RED + '  ✖  Enter a number between 2 and 32.\n' + Style.RESET_ALL)
+                            sys.stdout.flush()
 
-                    # Generate a random internal room code — users never see this.
+                        _field('👑', 'Host mode?', 'y = you control kicks, bans and MOTD  /  n = open room')
+                        enable_host_str = input(Fore.CYAN + '     › (y/N) ' + Style.RESET_ALL).strip().lower()
+                        is_host = enable_host_str == 'y'
+
+                        passcode = ''
+                        motd = ''
+                        if is_host:
+                            _field('🔒', 'Passcode', 'digits only — leave blank for an open room')
+                            while True:
+                                raw_pc = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                                if not raw_pc:
+                                    break
+                                if raw_pc.isdigit():
+                                    passcode = raw_pc
+                                    break
+                                sys.stdout.write(Fore.RED + '  ✖  Digits only (or leave blank).\n' + Style.RESET_ALL)
+                                sys.stdout.flush()
+
+                            _field('📢', 'Message of the day', 'shown to everyone when they join')
+                            motd = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+
+                    # --- Launch the room (shared by create and preset paths) ---
                     room_code = '%016x' % random.getrandbits(64)
                     effective_room_code = room_code + ':' + passcode if passcode else room_code
 

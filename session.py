@@ -56,6 +56,7 @@ from time import sleep, time
 import nacl.public
 from colorama import Fore, Style
 
+import db
 import discovery
 from protocol import (
     BEACON_PREFIX,
@@ -118,6 +119,7 @@ class UDPClient:
         self.motd = motd
         self.anonymous = anonymous
         self._passcode = passcode
+        self._muted = db.get_setting('muted', '0') == '1'
         # Raw token without the passcode suffix — embedded in beacons so
         # joiners can read it and reconstruct the effective room code themselves.
         self._raw_room_code = room_code[:-len(':' + passcode)] if passcode else room_code
@@ -319,7 +321,7 @@ class UDPClient:
                 'connected': threading.Event(),
                 'name_colour': Fore.CYAN,
                 'text_colour': Fore.WHITE,
-                'muted': False,
+                'muted': self._muted,
                 'username': '',
                 'is_host': False,
                 'room_name': '',
@@ -725,10 +727,12 @@ class UDPClient:
             pass
 
     def _set_all_muted(self, muted):
-        """Set the mute flag on every peer and print a confirmation."""
+        """Set the mute flag on every peer, persist the preference, and print a confirmation."""
+        self._muted = muted
         with self._peers_lock:
             for p in self._peers.values():
                 p['muted'] = muted
+        db.set_setting('muted', '1' if muted else '0')
         action = 'Notifications muted.' if muted else 'Notifications unmuted.'
         with print_lock:
             sys.stdout.write(f'\r{" " * 80}\r')
@@ -882,6 +886,56 @@ class UDPClient:
                         sys.stdout.write(
                             Fore.YELLOW + Style.BRIGHT
                             + f'MOTD updated: {self.motd}\n'
+                            + Style.RESET_ALL
+                        )
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                if msg == '/dump_presets':
+                    text = db.dump_room_presets_text()
+                    if text:
+                        import datetime
+                        stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                        path = os.path.expanduser(f'~/p2p_presets_{stamp}.txt')
+                        try:
+                            with open(path, 'w', encoding='utf-8') as f:
+                                f.write(text)
+                            msg_out = f'Presets exported to {path}'
+                            colour = Fore.GREEN
+                        except OSError as e:
+                            msg_out = f'Export failed: {e}'
+                            colour = Fore.RED
+                    else:
+                        msg_out = 'No presets to export.'
+                        colour = Fore.YELLOW
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(colour + Style.BRIGHT + msg_out + '\n' + Style.RESET_ALL)
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                if msg == '/wipe_presets':
+                    db.wipe_room_presets()
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(
+                            Fore.YELLOW + Style.BRIGHT + 'All presets deleted.\n' + Style.RESET_ALL
+                        )
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                if msg == '/save_preset' and self.is_host:
+                    db.save_room_preset(
+                        name=self.room_name,
+                        slots=self._max_peers,
+                        is_host=True,
+                        passcode=self._passcode,
+                    )
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(
+                            Fore.GREEN + Style.BRIGHT
+                            + f'Preset saved: "{self.room_name}"\n'
                             + Style.RESET_ALL
                         )
                         ui._paint_panel()
