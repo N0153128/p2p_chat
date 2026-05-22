@@ -182,36 +182,45 @@ class UDPClient:
 
     def _statusbar(self):
         """Return the status bar string showing room members."""
+        from colorama import Back
+        import shutil as _shutil
+        cols = _shutil.get_terminal_size(fallback=(80, 24)).columns
+
         with self._peers_lock:
             connected = [
                 p for p in self._peers.values() if p['connected'].is_set()
             ]
-        total = 1 + len(connected)  # include ourselves
-        capacity = MAX_PEERS  # room fits MAX_PEERS people total
+        total = 1 + len(connected)
+        capacity = MAX_PEERS
 
-        # Member list: us first, then peers in name_colour.
+        # Count badge: bright cyan text on dark blue background.
+        badge = (
+            Back.BLUE + Fore.WHITE + Style.BRIGHT
+            + f' {total}/{capacity} '
+            + Style.RESET_ALL
+        )
+
+        # Member list: our name first, then peers, separated by a dim bullet.
+        bullet = Back.BLACK + Fore.WHITE + Style.DIM + '  ·  ' + Style.RESET_ALL
         members = [
-            self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL
+            Back.BLACK + self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL
         ]
         for p in connected:
             name = p['username'] or '?'
             members.append(
-                p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL
+                Back.BLACK + p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL
             )
+        names_str = bullet.join(members)
 
-        sep = Fore.WHITE + '  ·  ' + Style.RESET_ALL
-        names = sep.join(members)
+        # Assemble: [badge]  [names]  padded to full width with dark background.
+        content = badge + Back.BLACK + '  ' + names_str + Back.BLACK + '  '
 
-        count = (
-            Fore.CYAN + Style.BRIGHT
-            + f'[{total}/{capacity}]'
-            + Style.RESET_ALL
-        )
-        bar = (
-            Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL
-            + '  ' + count + '  ' + names + '  '
-            + Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL
-        )
+        # Strip ANSI to measure visible length, then right-pad with spaces.
+        import re
+        visible = re.sub(r'\x1b\[[0-9;]*m', '', content)
+        padding = max(0, cols - len(visible))
+        bar = content + Back.BLACK + ' ' * padding + Style.RESET_ALL
+
         return bar
 
     def _redraw_statusbar(self):
