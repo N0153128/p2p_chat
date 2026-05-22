@@ -70,8 +70,9 @@ CTRL_META_PREFIX = b'__meta__:'
 """
 Prefix for the encrypted metadata message sent once after connect.
 
-Full format: ``__meta__:<name_colour>,<text_colour>``
+Full format: ``__meta__:<username>,<name_colour>,<text_colour>``
 
-Carries the sender's chosen name and text colours so the receiver can
-render the sender's messages exactly as the sender intended.
+Carries the sender's username and chosen colours so the receiver can
+render the sender's messages exactly as the sender intended and show
+the username in the status bar.
 """

@@ -47,6 +47,7 @@ joiners).  All other packet types require the source to be a known peer.
 """
 
 import os
+import shutil
 import signal
 import sys
 import threading
@@ -100,6 +101,7 @@ class UDPClient:
         self.username = username
         self.name_colour = name_colour
         self.text_colour = text_colour
+        self._own_addr = sock.getsockname()
 
         self.done = threading.Event()
         # True when at least one peer disconnected (not a local /exit).
@@ -118,8 +120,8 @@ class UDPClient:
 
         self._prev_sigint = signal.signal(signal.SIGINT, self._handle_sigint)
 
-        recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
-        recv_thread.start()
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
 
         if room_code and chat_port:
             # LAN mode: discovery runs for the life of the room.
@@ -150,23 +152,73 @@ class UDPClient:
         send_thread.start()
 
         ui.get_prompt = self._prompt
+        ui.get_statusbar = self._statusbar
+        with print_lock:
+            ui.enable_statusbar()
+            sys.stdout.flush()
+        self._panel_disabled = False
         self.done.wait()
+        with print_lock:
+            if not self._panel_disabled:
+                ui.disable_statusbar()
+            sys.stdout.flush()
         ui.get_prompt = lambda: '> '
+        ui.get_statusbar = lambda: ''
         signal.signal(signal.SIGINT, self._prev_sigint)
+        # Wait for the recv thread to fully stop before returning so a
+        # subsequent session doesn't race on the same socket.
+        self._recv_thread.join(timeout=2.0)
 
     # ------------------------------------------------------------------
     # Prompt
     # ------------------------------------------------------------------
 
     def _prompt(self):
-        """Return the current input prompt string including connected peer count."""
-        with self._peers_lock:
-            n = sum(1 for p in self._peers.values() if p['connected'].is_set())
-        label = f'{n} peer{"s" if n != 1 else ""}'
         return (
-            Fore.CYAN + Style.BRIGHT + f'[{label}]'
-            + Style.RESET_ALL + ' > '
+            Fore.WHITE + Style.DIM + '(you) ' + Style.RESET_ALL
+            + self.name_colour + Style.BRIGHT + f'<{self.username}>' + Style.RESET_ALL
+            + self.text_colour + ': ' + Style.RESET_ALL
         )
+
+    def _statusbar(self):
+        """Return the status bar string showing room members."""
+        with self._peers_lock:
+            connected = [
+                p for p in self._peers.values() if p['connected'].is_set()
+            ]
+        total = 1 + len(connected)  # include ourselves
+        capacity = MAX_PEERS  # room fits MAX_PEERS people total
+
+        # Member list: us first, then peers in name_colour.
+        members = [
+            self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL
+        ]
+        for p in connected:
+            name = p['username'] or '?'
+            members.append(
+                p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL
+            )
+
+        sep = Fore.WHITE + '  ·  ' + Style.RESET_ALL
+        names = sep.join(members)
+
+        count = (
+            Fore.CYAN + Style.BRIGHT
+            + f'[{total}/{capacity}]'
+            + Style.RESET_ALL
+        )
+        bar = (
+            Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL
+            + '  ' + count + '  ' + names + '  '
+            + Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL
+        )
+        return bar
+
+    def _redraw_statusbar(self):
+        """Repaint the full bottom panel from any thread (acquires print_lock)."""
+        with print_lock:
+            ui._paint_panel()
+            sys.stdout.flush()
 
     # ------------------------------------------------------------------
     # Peer management
@@ -179,7 +231,7 @@ class UDPClient:
         Returns True if the peer was newly added.
         """
         with self._peers_lock:
-            if addr in self._peers or len(self._peers) >= MAX_PEERS:
+            if addr in self._peers or len(self._peers) >= MAX_PEERS - 1:
                 return False
             self._peers[addr] = {
                 'box': None,
@@ -187,6 +239,7 @@ class UDPClient:
                 'name_colour': Fore.CYAN,
                 'text_colour': Fore.WHITE,
                 'muted': False,
+                'username': '',
             }
         t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
         t.start()
@@ -197,10 +250,20 @@ class UDPClient:
     # ------------------------------------------------------------------
 
     def _handle_sigint(self, sig, frame):
+        if self.done.is_set():
+            # Second Ctrl+C after already leaving the room — hard exit.
+            sys.exit(0)
         self._broadcast(CTRL_DISCONNECT)
-        print()
+        with print_lock:
+            ui.disable_statusbar()
+            self._panel_disabled = True
+            sys.stdout.write(
+                '\n' + Fore.LIGHTYELLOW_EX + Style.BRIGHT
+                + 'Left the room.  Press Ctrl+C again to quit.\n'
+                + Style.RESET_ALL
+            )
+            sys.stdout.flush()
         self.done.set()
-        sys.exit(0)
 
     # ------------------------------------------------------------------
     # Packet helpers
@@ -239,10 +302,10 @@ class UDPClient:
                 pass
 
     def _send_meta_to(self, addr, box):
-        """Send our colour metadata and join announcement to a single peer."""
+        """Send our username and colour metadata to a single peer."""
         name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
         text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
-        meta = f'{name_colour_name},{text_colour_name}'.encode()
+        meta = f'{self.username},{name_colour_name},{text_colour_name}'.encode()
         try:
             self.sock.sendto(box.encrypt(CTRL_META_PREFIX + meta), addr)
             self.sock.sendto(
@@ -335,7 +398,7 @@ class UDPClient:
 
                 with self._peers_lock:
                     already_known = peer_addr in self._peers
-                    full = len(self._peers) >= MAX_PEERS
+                    full = len(self._peers) >= MAX_PEERS - 1
 
                 if already_known or full:
                     continue
@@ -366,9 +429,14 @@ class UDPClient:
             if data.startswith(BEACON_PREFIX):
                 continue
 
+            # Discard looped-back packets (our own datagrams reflected by the
+            # kernel when sending to a local address on the same machine).
+            if addr == self._own_addr:
+                continue
+
             with self._peers_lock:
                 known = addr in self._peers
-                full = len(self._peers) >= MAX_PEERS
+                full = len(self._peers) >= MAX_PEERS - 1
 
             # Accept PUNCH from unknown addresses: this is a late joiner
             # punching us first (common when we sent them a beacon reply).
@@ -400,6 +468,7 @@ class UDPClient:
                             + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
                             + Style.RESET_ALL
                         )
+                        ui._paint_panel()
                         sys.stdout.flush()
                 continue
 
@@ -421,6 +490,7 @@ class UDPClient:
                             + f'Peer joined! ({addr[0]}:{addr[1]}, encrypted)\n'
                             + Style.RESET_ALL
                         )
+                        ui._paint_panel()
                         sys.stdout.flush()
                 continue
 
@@ -442,11 +512,12 @@ class UDPClient:
                     sys.stdout.write(f'\r{" " * 80}\r')
                     sys.stdout.write(
                         Fore.LIGHTYELLOW_EX + Style.BRIGHT
-                        + f'A peer left.'
+                        + 'A peer left.'
                         + (f'  ({remaining} peer{"s" if remaining != 1 else ""} remaining)'
                            if remaining else '')
                         + '\n' + Style.RESET_ALL
                     )
+                    ui._paint_panel()
                     sys.stdout.flush()
                 self.peer_disconnected = True
                 # Only end the session if no peers remain AND discovery is done.
@@ -463,9 +534,16 @@ class UDPClient:
                 ).strip().split(',')
                 with self._peers_lock:
                     if addr in self._peers:
-                        self._peers[addr]['name_colour'] = colour_for(parts[0])
-                        if len(parts) >= 2:
+                        if len(parts) == 3:
+                            # New format: username,name_colour,text_colour
+                            self._peers[addr]['username'] = parts[0]
+                            self._peers[addr]['name_colour'] = colour_for(parts[1])
+                            self._peers[addr]['text_colour'] = colour_for(parts[2])
+                        elif len(parts) == 2:
+                            # Legacy format: name_colour,text_colour
+                            self._peers[addr]['name_colour'] = colour_for(parts[0])
                             self._peers[addr]['text_colour'] = colour_for(parts[1])
+                self._redraw_statusbar()
                 continue
 
             with self._peers_lock:
@@ -499,16 +577,73 @@ class UDPClient:
         with print_lock:
             sys.stdout.write(f'\r{" " * 80}\r')
             sys.stdout.write(Fore.YELLOW + Style.BRIGHT + action + '\n' + Style.RESET_ALL)
+            ui._paint_panel()
             sys.stdout.flush()
+
+    def _redraw_input(self, buf):
+        """Write prompt + buffer, cursor left after last typed character.
+
+        Called by ui._paint_panel via get_input_redraw — the panel already
+        erased the input row before calling this, so just write content.
+        Must be called while print_lock is held.
+        """
+        sys.stdout.write(self._prompt())
+        if buf:
+            sys.stdout.write(self.text_colour + ''.join(buf) + Style.RESET_ALL)
+
+    def _readline_styled(self):
+        """Read one line from stdin in raw mode, echoing each character in
+        the user's text colour.  Handles backspace and Ctrl+C/D.
+
+        Returns the completed line string, or raises KeyboardInterrupt /
+        EOFError as appropriate.
+        """
+        import termios, tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        tty.setraw(fd)
+        buf = []
+
+        # Register a hook so print_msg can redraw our input line after
+        # printing an incoming message (otherwise the prompt is left blank
+        # and the buffer content is invisible).
+        ui.get_input_redraw = lambda: self._redraw_input(buf)
+
+        with print_lock:
+            ui._paint_panel()
+            sys.stdout.flush()
+
+        try:
+            while True:
+                ch = sys.stdin.read(1)
+                if not ch or ch == '\x04':          # EOF / Ctrl+D
+                    raise EOFError
+                if ch == '\x03':                    # Ctrl+C
+                    raise KeyboardInterrupt
+                if ch in ('\r', '\n'):              # Enter
+                    return ''.join(buf)
+                if ch in ('\x7f', '\x08'):          # Backspace / DEL
+                    if buf:
+                        buf.pop()
+                        with print_lock:
+                            sys.stdout.write('\b \b')
+                            sys.stdout.flush()
+                else:
+                    buf.append(ch)
+                    with print_lock:
+                        sys.stdout.write(
+                            self.text_colour + ch + Style.RESET_ALL
+                        )
+                        sys.stdout.flush()
+        finally:
+            ui.get_input_redraw = None
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
     def _send_loop(self):
         """Read stdin and broadcast encrypted messages to all connected peers."""
         try:
             while not self.done.is_set():
-                with print_lock:
-                    sys.stdout.write(self._prompt())
-                    sys.stdout.flush()
-                msg = sys.stdin.readline().rstrip('\n')
+                msg = self._readline_styled()
                 if self.done.is_set():
                     break
                 if msg == '/exit':

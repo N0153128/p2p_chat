@@ -83,7 +83,7 @@ _GREETING_PRESETS = [
         Fore.MAGENTA, Fore.GREEN,
     ),
     (
-        'isometric3',
+        'colossal',
         [Fore.CYAN + Style.BRIGHT, Fore.BLUE + Style.BRIGHT,
          Fore.BLUE, Fore.MAGENTA, Fore.MAGENTA + Style.BRIGHT],
         Fore.CYAN, Fore.BLUE,
@@ -134,61 +134,67 @@ def _rule(width, char='─'):
 
 
 def show_greeting():
-    """Print a full-width greeting screen to stdout.
-
-    Renders a gradient ASCII-art title, a decorative border, and a short
-    tagline.  Safe to call before colorama.init() — colorama codes work on
-    ANSI-capable terminals without explicit initialisation.
-    """
+    """Print a full-width greeting screen to stdout, scaled to terminal width."""
+    from colorama import Back
     font, gradient, top_colour, bot_colour = random.choice(_GREETING_PRESETS)
     cols = shutil.get_terminal_size(fallback=(80, 24)).columns
 
-    # --- ASCII art title ---
-    art = pyfiglet.figlet_format('p2p  chat', font=font)
-    art_lines = art.splitlines()
-    art_width = max((len(line) for line in art_lines), default=0)
+    # --- ASCII art — pick a font that actually fits the terminal ---
+    def _render(f):
+        lines = [ln for ln in pyfiglet.figlet_format('p2p  chat', font=f).splitlines() if ln.strip()]
+        w = max((len(ln) for ln in lines), default=0)
+        return lines, w
 
-    # Apply a vertical gradient across the title lines.
+    art_lines, art_width = _render(font)
+    # If the chosen font is too wide (> 90 % of terminal), fall back to a
+    # narrower font while keeping the same colour scheme.
+    if art_width > cols * 0.9:
+        for fallback in ('slant', 'small', 'banner'):
+            alt_lines, alt_width = _render(fallback)
+            if alt_width <= cols * 0.9:
+                art_lines, art_width = alt_lines, alt_width
+                break
+
+    # Pad lines to uniform width for the background block.
+    art_lines = [line.ljust(art_width) for line in art_lines]
+
+    # Centre the art block within the terminal.
+    pad = max(0, (cols - art_width) // 2)
+
+    # Vertical gradient on foreground; background fills the full terminal width.
     gradient_len = len(gradient)
     coloured_lines = []
     for i, line in enumerate(art_lines):
-        colour = gradient[i * gradient_len // max(len(art_lines), 1)]
-        coloured_lines.append(colour + Style.BRIGHT + line + Style.RESET_ALL)
+        fg = gradient[i * gradient_len // max(len(art_lines), 1)]
+        # Left padding (plain), art with colour+background, right fill to edge.
+        right_fill = cols - pad - art_width
+        coloured_lines.append(
+            Back.BLACK + ' ' * pad
+            + fg + Style.BRIGHT + line
+            + Style.RESET_ALL + Back.BLACK + ' ' * max(0, right_fill)
+            + Style.RESET_ALL
+        )
 
     # --- top border ---
-    sys.stdout.write('\n')
     sys.stdout.write(top_colour + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
-    sys.stdout.write('\n')
 
-    # --- centred title ---
-    pad = max(0, (cols - art_width) // 2)
+    # --- title block (full-width background) ---
+    blank_bg = Back.BLACK + ' ' * cols + Style.RESET_ALL
+    sys.stdout.write(blank_bg + '\n')
     for line in coloured_lines:
-        sys.stdout.write(' ' * pad + line + '\n')
-
-    sys.stdout.write('\n')
+        sys.stdout.write(line + '\n')
+    sys.stdout.write(blank_bg + '\n')
 
     # --- tagline ---
     tagline = 'serverless  ·  encrypted  ·  peer-to-peer'
-    sys.stdout.write(
-        Fore.WHITE + Style.BRIGHT
-        + _centre(tagline, cols)
-        + Style.RESET_ALL + '\n'
-    )
+    sys.stdout.write(Fore.WHITE + Style.BRIGHT + _centre(tagline, cols) + Style.RESET_ALL + '\n')
 
-    # --- sub-rule ---
-    sys.stdout.write('\n')
-    sys.stdout.write(
-        bot_colour + Style.BRIGHT + _centre(_rule(len(tagline) + 8, '·'), cols) + Style.RESET_ALL + '\n'
-    )
-
-    # --- hint ---
-    hint = 'press  Ctrl+C  at any time to quit'
-    sys.stdout.write(Fore.WHITE + _centre(hint, cols) + Style.RESET_ALL + '\n')
+    # --- hint row ---
+    hint = '/exit · leave room    /mute · silence    Ctrl+C · leave / quit'
+    sys.stdout.write(Fore.WHITE + Style.DIM + _centre(hint, cols) + Style.RESET_ALL + '\n')
 
     # --- bottom border ---
-    sys.stdout.write('\n')
     sys.stdout.write(bot_colour + Style.BRIGHT + _rule(cols, '═') + Style.RESET_ALL + '\n')
-    sys.stdout.write('\n')
     sys.stdout.flush()
 
 
@@ -266,12 +272,145 @@ def _play_beep():
 # so incoming-message reprints stay in sync with the peer-count prompt.
 get_prompt = lambda: '> '  # noqa: E731
 
+# Session sets this to a callable that redraws the prompt + in-progress
+# typed buffer after an incoming message interrupts the input line.
+# None when no readline is active.
+get_input_redraw = None
+
+# Session sets this to a callable that returns the status bar string (or '').
+# When empty the status bar is not shown and no scroll region is active.
+get_statusbar = lambda: ''  # noqa: E731
+
+# ---------------------------------------------------------------------------
+# Fixed bottom UI panel (status bar + input area)
+#
+# Layout (bottom 4 rows, outside the scroll region):
+#   rows-3 : thin separator line above input
+#   rows-2 : input line  (prompt + typed text)
+#   rows-1 : thin separator line above status bar
+#   rows   : status bar  (member list)
+#
+# Strategy: set a scroll region from row 1 to rows-4 so chat output never
+# clobbers these rows.  We move into them explicitly to repaint, then restore
+# the cursor with DEC save/restore (\x1b7 / \x1b8) which survives scroll.
+# ---------------------------------------------------------------------------
+
+_ERASE_LINE = '\x1b[2K'
+_SAVE_CUR   = '\x1b7'
+_REST_CUR   = '\x1b8'
+
+
+def _term_size():
+    return shutil.get_terminal_size(fallback=(80, 24))
+
+
+def _set_scroll_region(rows):
+    sys.stdout.write(f'\x1b[1;{rows - 4}r')
+
+
+def _clear_scroll_region():
+    sys.stdout.write('\x1b[r')
+
+
+def _paint_panel(restore_cursor=True):
+    """Repaint the separator, input, and status rows in-place.
+
+    Two cursor-restore strategies depending on whether readline is active:
+
+    • readline active (get_input_redraw set):
+        Save cursor AFTER writing the input row (cursor is after typed text),
+        paint status bar, restore — cursor ends up after typed text, ready for
+        the next keystroke.  restore_cursor is ignored.
+
+    • readline not active:
+        Save cursor at START (pre-paint position), paint all rows, then restore
+        if restore_cursor is True (default).
+
+    Must be called while print_lock is held.
+    """
+    cols, rows = _term_size()
+    bar  = get_statusbar()
+    sep  = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
+
+    if get_input_redraw is not None:
+        # rows-3: separator above input
+        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE + sep)
+        # rows-2: input row — write prompt + buffer, save cursor after typed text
+        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE)
+        get_input_redraw()          # cursor now after typed text in rows-2
+        sys.stdout.write(_SAVE_CUR)
+        # rows-1: separator above status bar
+        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE + sep)
+        # rows: status bar
+        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE + (bar or ''))
+        sys.stdout.write(_REST_CUR)
+    else:
+        # No active readline: save pre-paint cursor, paint all, optionally restore.
+        sys.stdout.write(_SAVE_CUR)
+        # rows-3: separator above input
+        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE + sep)
+        # rows-2: input row
+        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE)
+        sys.stdout.write(get_prompt())
+        # rows-1: separator above status bar
+        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE + sep)
+        # rows: status bar
+        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE + (bar or ''))
+        if restore_cursor:
+            sys.stdout.write(_REST_CUR)
+
+
+def _write_statusbar():
+    """Update only the status bar row, preserving the cursor position."""
+    bar  = get_statusbar()
+    if not bar:
+        return
+    _, rows = _term_size()
+    sys.stdout.write(
+        _SAVE_CUR
+        + f'\x1b[{rows};1H' + _ERASE_LINE + bar
+        + _REST_CUR
+    )
+
+
+def enable_statusbar():
+    """Reserve the bottom 4 rows and paint the initial panel.
+
+    Call once when a session starts, while print_lock is held.
+    """
+    _, rows = _term_size()
+    _set_scroll_region(rows)
+    # Move cursor into the scroll region so it doesn't sit on the panel.
+    sys.stdout.write(f'\x1b[{rows - 4};1H')
+    _paint_panel()
+
+
+def disable_statusbar():
+    """Erase the panel and restore full-terminal scrolling.
+
+    Call once when a session ends, while print_lock is held.
+    """
+    _, rows = _term_size()
+    # Erase all four reserved rows.
+    for r in (rows - 3, rows - 2, rows - 1, rows):
+        sys.stdout.write(f'\x1b[{r};1H' + _ERASE_LINE)
+    _clear_scroll_region()
+    # Leave cursor at a clean position.
+    sys.stdout.write(f'\x1b[{rows - 3};1H')
+
+
+def redraw_statusbar():
+    """Thread-safe redraw of status bar only (acquires print_lock)."""
+    with print_lock:
+        _write_statusbar()
+        sys.stdout.flush()
+
 
 def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE, alert=False):
-    """Print an incoming chat message without clobbering the input prompt.
+    """Print an incoming chat message and repaint the input panel.
 
-    Clears the current prompt line, writes the coloured message, then
-    reprints the ``> `` prompt.  All writes are serialised via
+    Clears the current line, writes the coloured message, then repaints the
+    separator + input + status rows.  All writes are serialised via
     :data:`print_lock`.
 
     Args:
@@ -280,18 +419,21 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
                        separator when *username_part* is non-empty).
         name_colour:   ANSI colour code applied to *username_part*.
         text_colour:   ANSI colour code applied to *text_part*.
-        alert:         If ``True``, emit a terminal bell character before the
-                       message so the user is notified of an incoming message.
+        alert:         If ``True``, play the notification sound.
     """
     if alert:
         _play_beep()
     with print_lock:
+        # Move to the last row of the scroll region so the message scrolls up
+        # into chat history regardless of where the cursor currently is.
+        _, rows = _term_size()
+        sys.stdout.write(f'\x1b[{rows - 4};1H')
         sys.stdout.write(f'\r{" " * 80}\r')
         sys.stdout.write(
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL + '\n'
         )
-        sys.stdout.write(get_prompt())
+        _paint_panel()
         sys.stdout.flush()
 
 

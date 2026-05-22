@@ -74,12 +74,15 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     if box is not None:
         connected_event.set()
         c._first_connected.set()
+    c._own_addr = sock.getsockname()
     c._peers = {
         remote_addr: {
             'box': box,
             'connected': connected_event,
             'name_colour': Fore.CYAN,
             'text_colour': Fore.WHITE,
+            'muted': False,
+            'username': '',
         }
     }
     return c
@@ -659,19 +662,11 @@ class TestMultiPeer:
         c._peers_lock = threading.Lock()
         c._first_connected = threading.Event()
         c._first_connected.set()
+        c._own_addr = addr_of(sock_a)
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': ''}
         c._peers = {
-            addr_of(sock_b): {
-                'box': box_a_b,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-            },
-            addr_of(sock_c): {
-                'box': box_a_c,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-            },
+            addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
+            addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},
         }
         c._peers[addr_of(sock_b)]['connected'].set()
         c._peers[addr_of(sock_c)]['connected'].set()
@@ -724,19 +719,11 @@ class TestMultiPeer:
         c._peers_lock = threading.Lock()
         c._first_connected = threading.Event()
         c._first_connected.set()
+        c._own_addr = addr_of(sock_a)
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': ''}
         c._peers = {
-            addr_of(sock_b): {
-                'box': box_a_b,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-            },
-            addr_of(sock_c): {
-                'box': box_a_c,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-            },
+            addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
+            addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},
         }
         c._peers[addr_of(sock_b)]['connected'].set()
         c._peers[addr_of(sock_c)]['connected'].set()
