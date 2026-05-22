@@ -70,9 +70,30 @@ CTRL_META_PREFIX = b'__meta__:'
 """
 Prefix for the encrypted metadata message sent once after connect.
 
-Full format: ``__meta__:<username>,<name_colour>,<text_colour>``
+Full format: ``__meta__:<username>,<name_colour>,<text_colour>,<is_host>,<room_name>``
 
-Carries the sender's username and chosen colours so the receiver can
-render the sender's messages exactly as the sender intended and show
-the username in the status bar.
+Carries the sender's username, chosen colours, host flag, and room name so the
+receiver can render the sender's messages exactly as the sender intended and
+show the username in the status bar.
 """
+
+CTRL_KICK_PREFIX = b'__kick__'
+"""Encrypted control message sent by host to kick a peer."""
+
+CTRL_BAN_PREFIX = b'__ban__'
+"""Encrypted control message sent by host to ban a peer."""
+
+CTRL_MOTD_PREFIX = b'__motd__:'
+"""Prefix for the encrypted MOTD message sent by the host after connect."""
+
+CTRL_HOST_META_PREFIX = b'__hostmeta__:'
+"""Prefix for host metadata broadcast."""
+
+CTRL_PASSCODE_CHALLENGE = b'__passcode__'
+"""Encrypted control message: host challenges joiner for passcode."""
+
+CTRL_PASSCODE_OK = b'__passcode_ok__'
+"""Encrypted control message: joiner sends correct passcode."""
+
+CTRL_PASSCODE_FAIL = b'__passcode_fail__'
+"""Encrypted control message: passcode verification failed."""

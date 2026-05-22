@@ -65,6 +65,11 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     c.peer_disconnected = False
     c.name_colour = Fore.CYAN
     c.text_colour = Fore.WHITE
+    c.is_host = False
+    c.motd = ''
+    c.room_name = ''
+    c._tab_selected = -1
+    c._banned_ips = set()
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
@@ -83,6 +88,8 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
             'text_colour': Fore.WHITE,
             'muted': False,
             'username': '',
+            'is_host': False,
+            'room_name': '',
         }
     }
     return c
@@ -656,6 +663,11 @@ class TestMultiPeer:
         c.peer_disconnected = False
         c.name_colour = Fore.CYAN
         c.text_colour = Fore.WHITE
+        c.is_host = False
+        c.motd = ''
+        c.room_name = ''
+        c._tab_selected = -1
+        c._banned_ips = set()
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
@@ -663,7 +675,7 @@ class TestMultiPeer:
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)
-        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': ''}
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': ''}
         c._peers = {
             addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
             addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},
@@ -713,6 +725,11 @@ class TestMultiPeer:
         c.peer_disconnected = False
         c.name_colour = Fore.CYAN
         c.text_colour = Fore.WHITE
+        c.is_host = False
+        c.motd = ''
+        c.room_name = ''
+        c._tab_selected = -1
+        c._banned_ips = set()
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
@@ -720,7 +737,7 @@ class TestMultiPeer:
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)
-        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': ''}
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': ''}
         c._peers = {
             addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
             addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},

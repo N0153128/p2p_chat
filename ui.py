@@ -288,7 +288,7 @@ get_statusbar = lambda: ''  # noqa: E731
 #   rows-3 : thin separator line above input
 #   rows-2 : input line  (prompt + typed text)
 #   rows-1 : thin separator line above status bar
-#   rows   : status bar  (member list)
+#   rows   : status bar
 #
 # Strategy: set a scroll region from row 1 to rows-4 so chat output never
 # clobbers these rows.  We move into them explicitly to repaint, then restore
@@ -329,8 +329,8 @@ def _paint_panel(restore_cursor=True):
     Must be called while print_lock is held.
     """
     cols, rows = _term_size()
-    bar  = get_statusbar()
-    sep  = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
+    bar = get_statusbar()
+    sep = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
 
     if get_input_redraw is not None:
         # rows-3: separator above input
@@ -362,7 +362,7 @@ def _paint_panel(restore_cursor=True):
 
 def _write_statusbar():
     """Update only the status bar row, preserving the cursor position."""
-    bar  = get_statusbar()
+    bar = get_statusbar()
     if not bar:
         return
     _, rows = _term_size()

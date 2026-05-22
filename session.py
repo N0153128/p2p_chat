@@ -60,8 +60,11 @@ import discovery
 from protocol import (
     BEACON_PREFIX,
     BROADCAST_INTERVAL,
+    CTRL_BAN_PREFIX,
     CTRL_DISCONNECT,
+    CTRL_KICK_PREFIX,
     CTRL_META_PREFIX,
+    CTRL_MOTD_PREFIX,
     MAX_PEERS,
     PUNCH_ACK_PREFIX,
     PUNCH_INTERVAL,
@@ -96,11 +99,22 @@ class UDPClient:
         peers=None,
         room_code=None,
         chat_port=None,
+        is_host=False,
+        room_name='',
+        motd='',
+        passcode='',
+        banned_ips=None,
     ):
         self.sock = sock
         self.username = username
         self.name_colour = name_colour
         self.text_colour = text_colour
+        self.is_host = is_host
+        self.room_name = room_name
+        self.motd = motd
+        self._passcode = passcode
+        self._banned_ips = banned_ips if banned_ips is not None else set()
+        self._tab_selected = -1
         self._own_addr = sock.getsockname()
 
         self.done = threading.Event()
@@ -182,45 +196,34 @@ class UDPClient:
 
     def _statusbar(self):
         """Return the status bar string showing room members."""
-        from colorama import Back
-        import shutil as _shutil
-        cols = _shutil.get_terminal_size(fallback=(80, 24)).columns
-
         with self._peers_lock:
-            connected = [
-                p for p in self._peers.values() if p['connected'].is_set()
-            ]
+            connected = [p for p in self._peers.values() if p['connected'].is_set()]
         total = 1 + len(connected)
         capacity = MAX_PEERS
-
-        # Count badge: bright cyan text on dark blue background.
-        badge = (
-            Back.BLUE + Fore.WHITE + Style.BRIGHT
-            + f' {total}/{capacity} '
-            + Style.RESET_ALL
-        )
-
-        # Member list: our name first, then peers, separated by a dim bullet.
-        bullet = Back.BLACK + Fore.WHITE + Style.DIM + '  ·  ' + Style.RESET_ALL
-        members = [
-            Back.BLACK + self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL
-        ]
+        members = [self.name_colour + Style.BRIGHT + self.username + Style.RESET_ALL]
         for p in connected:
             name = p['username'] or '?'
-            members.append(
-                Back.BLACK + p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL
+            members.append(p['name_colour'] + Style.BRIGHT + name + Style.RESET_ALL)
+
+        # Apply tab-select highlight to the selected peer (index into connected list).
+        tab_idx = self._tab_selected
+        if tab_idx >= 0 and connected:
+            tab_idx = tab_idx % len(connected)
+            # Rebuild the selected peer's entry with inverse-video highlight.
+            # Index 0 in members is ourselves; peers start at index 1.
+            peer_member_idx = tab_idx + 1
+            name = connected[tab_idx]['username'] or '?'
+            from colorama import Back
+            members[peer_member_idx] = (
+                Fore.BLACK + Back.WHITE + ' ' + name + ' ' + Style.RESET_ALL
             )
-        names_str = bullet.join(members)
 
-        # Assemble: [badge]  [names]  padded to full width with dark background.
-        content = badge + Back.BLACK + '  ' + names_str + Back.BLACK + '  '
-
-        # Strip ANSI to measure visible length, then right-pad with spaces.
-        import re
-        visible = re.sub(r'\x1b\[[0-9;]*m', '', content)
-        padding = max(0, cols - len(visible))
-        bar = content + Back.BLACK + ' ' * padding + Style.RESET_ALL
-
+        sep = Fore.WHITE + '  ·  ' + Style.RESET_ALL
+        names = sep.join(members)
+        count = Fore.CYAN + Style.BRIGHT + f'[{total}/{capacity}]' + Style.RESET_ALL
+        bar = (Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL
+               + '  ' + count + '  ' + names + '  '
+               + Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL)
         return bar
 
     def _redraw_statusbar(self):
@@ -228,6 +231,57 @@ class UDPClient:
         with print_lock:
             ui._paint_panel()
             sys.stdout.flush()
+
+    # ------------------------------------------------------------------
+    # Host actions
+    # ------------------------------------------------------------------
+
+    def _kick_peer(self, addr):
+        """Kick a peer (host only). Notifies all others and removes them."""
+        with self._peers_lock:
+            peer = self._peers.get(addr)
+        if peer is None:
+            return
+        username = peer.get('username') or str(addr)
+        box = peer.get('box')
+        if box:
+            try:
+                self.sock.sendto(box.encrypt(CTRL_KICK_PREFIX), addr)
+            except Exception:
+                pass
+        msg = f'[HOST] {username} was kicked.'
+        self._broadcast(msg.encode('utf-8'))
+        with print_lock:
+            sys.stdout.write(
+                Fore.YELLOW + Style.BRIGHT + msg + '\n' + Style.RESET_ALL
+            )
+        with self._peers_lock:
+            self._peers.pop(addr, None)
+        self._redraw_statusbar()
+
+    def _ban_peer(self, addr):
+        """Ban a peer (host only). Adds IP to ban list and removes them."""
+        with self._peers_lock:
+            peer = self._peers.get(addr)
+        if peer is None:
+            return
+        username = peer.get('username') or str(addr)
+        box = peer.get('box')
+        if box:
+            try:
+                self.sock.sendto(box.encrypt(CTRL_BAN_PREFIX), addr)
+            except Exception:
+                pass
+        msg = f'[HOST] {username} was banned.'
+        self._broadcast(msg.encode('utf-8'))
+        with print_lock:
+            sys.stdout.write(
+                Fore.YELLOW + Style.BRIGHT + msg + '\n' + Style.RESET_ALL
+            )
+        self._banned_ips.add(addr[0])
+        with self._peers_lock:
+            self._peers.pop(addr, None)
+        self._redraw_statusbar()
 
     # ------------------------------------------------------------------
     # Peer management
@@ -249,6 +303,8 @@ class UDPClient:
                 'text_colour': Fore.WHITE,
                 'muted': False,
                 'username': '',
+                'is_host': False,
+                'room_name': '',
             }
         t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
         t.start()
@@ -311,15 +367,20 @@ class UDPClient:
                 pass
 
     def _send_meta_to(self, addr, box):
-        """Send our username and colour metadata to a single peer."""
+        """Send our username, colour metadata, host flag, and room name to a single peer."""
         name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
         text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
-        meta = f'{self.username},{name_colour_name},{text_colour_name}'.encode()
+        is_host_str = '1' if self.is_host else '0'
+        meta = f'{self.username},{name_colour_name},{text_colour_name},{is_host_str},{self.room_name}'.encode()
         try:
             self.sock.sendto(box.encrypt(CTRL_META_PREFIX + meta), addr)
             self.sock.sendto(
                 box.encrypt(f'{self.username} joined'.encode()), addr
             )
+            if self.is_host and self.motd:
+                self.sock.sendto(
+                    box.encrypt(CTRL_MOTD_PREFIX + self.motd.encode()), addr
+                )
         except Exception:
             pass
 
@@ -349,12 +410,15 @@ class UDPClient:
         Whenever a valid authenticated beacon arrives from a new peer, calls
         _add_peer so it gets punched and connected without interrupting chat.
         """
+        import base64
         import hashlib
         import hmac as hmaclib
         import socket as socklib
 
         tag = discovery._beacon_hmac(room_code, discovery.SESSION_ID)
-        my_beacon = BEACON_PREFIX + f'{discovery.SESSION_ID}:{chat_port}:{tag}'.encode()
+        # Embed room_name as base64 in the beacon (informational, not authenticated).
+        room_name_b64 = base64.urlsafe_b64encode(self.room_name.encode()).decode() if self.room_name else ''
+        my_beacon = BEACON_PREFIX + f'{discovery.SESSION_ID}:{chat_port}:{tag}:{room_name_b64}'.encode()
         seen_sids = set()
 
         try:
@@ -385,10 +449,14 @@ class UDPClient:
 
                 payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
                 parts = payload.split(':')
-                if len(parts) != 3:
+                # Accept 3-part (old format) or 4-part (new format with room_name_b64).
+                if len(parts) < 3:
                     continue
 
-                peer_sid, peer_port_str, peer_tag = parts
+                peer_sid = parts[0]
+                peer_port_str = parts[1]
+                peer_tag = parts[2]
+                # parts[3] is room_name_b64 if present (informational only).
 
                 if peer_sid == discovery.SESSION_ID or peer_sid in seen_sids:
                     continue
@@ -441,6 +509,10 @@ class UDPClient:
             # Discard looped-back packets (our own datagrams reflected by the
             # kernel when sending to a local address on the same machine).
             if addr == self._own_addr:
+                continue
+
+            # Drop packets from banned IPs.
+            if addr[0] in self._banned_ips:
                 continue
 
             with self._peers_lock:
@@ -543,16 +615,37 @@ class UDPClient:
                 ).strip().split(',')
                 with self._peers_lock:
                     if addr in self._peers:
-                        if len(parts) == 3:
-                            # New format: username,name_colour,text_colour
+                        if len(parts) >= 3:
+                            # Format: username,name_colour,text_colour[,is_host,room_name]
                             self._peers[addr]['username'] = parts[0]
                             self._peers[addr]['name_colour'] = colour_for(parts[1])
                             self._peers[addr]['text_colour'] = colour_for(parts[2])
+                            if len(parts) >= 5:
+                                self._peers[addr]['is_host'] = parts[3] == '1'
+                                self._peers[addr]['room_name'] = parts[4]
                         elif len(parts) == 2:
                             # Legacy format: name_colour,text_colour
                             self._peers[addr]['name_colour'] = colour_for(parts[0])
                             self._peers[addr]['text_colour'] = colour_for(parts[1])
                 self._redraw_statusbar()
+                continue
+
+            if plaintext == CTRL_KICK_PREFIX:
+                ui.print_msg('', Fore.RED + Style.BRIGHT + 'You were kicked from the room.' + Style.RESET_ALL,
+                             name_colour='', text_colour='')
+                self.done.set()
+                continue
+
+            if plaintext == CTRL_BAN_PREFIX:
+                ui.print_msg('', Fore.RED + Style.BRIGHT + 'You were banned from the room.' + Style.RESET_ALL,
+                             name_colour='', text_colour='')
+                self.done.set()
+                continue
+
+            if plaintext.startswith(CTRL_MOTD_PREFIX):
+                motd = plaintext[len(CTRL_MOTD_PREFIX):].decode('utf-8', errors='replace')
+                ui.print_msg('', f'📢 MOTD: {motd}',
+                             name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
                 continue
 
             with self._peers_lock:
@@ -630,7 +723,56 @@ class UDPClient:
                 if ch == '\x03':                    # Ctrl+C
                     raise KeyboardInterrupt
                 if ch in ('\r', '\n'):              # Enter
+                    self._tab_selected = -1
                     return ''.join(buf)
+                if ch == '\t':                      # Tab — cycle through peers
+                    with self._peers_lock:
+                        connected = [
+                            p for p in self._peers.values() if p['connected'].is_set()
+                        ]
+                    if connected:
+                        if self._tab_selected < 0:
+                            self._tab_selected = 0
+                        else:
+                            self._tab_selected = (self._tab_selected + 1) % len(connected)
+                        with print_lock:
+                            ui._paint_panel()
+                            sys.stdout.flush()
+                    continue
+                if ch == '\x1b':                    # Escape — clear tab selection
+                    self._tab_selected = -1
+                    with print_lock:
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                # k = kick selected peer (host only, only in tab-select mode)
+                if ch == 'k' and self._tab_selected >= 0 and self.is_host:
+                    with self._peers_lock:
+                        connected_addrs = [
+                            addr for addr, p in self._peers.items() if p['connected'].is_set()
+                        ]
+                    idx = self._tab_selected % len(connected_addrs) if connected_addrs else -1
+                    self._tab_selected = -1
+                    if idx >= 0:
+                        self._kick_peer(connected_addrs[idx])
+                    with print_lock:
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                # B = ban selected peer (host only, only in tab-select mode)
+                if ch == 'B' and self._tab_selected >= 0 and self.is_host:
+                    with self._peers_lock:
+                        connected_addrs = [
+                            addr for addr, p in self._peers.items() if p['connected'].is_set()
+                        ]
+                    idx = self._tab_selected % len(connected_addrs) if connected_addrs else -1
+                    self._tab_selected = -1
+                    if idx >= 0:
+                        self._ban_peer(connected_addrs[idx])
+                    with print_lock:
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
                 if ch in ('\x7f', '\x08'):          # Backspace / DEL
                     if buf:
                         buf.pop()
@@ -666,11 +808,30 @@ class UDPClient:
                         sys.stdout.flush()
                     self.done.set()
                     break
+                if msg == '/clear':
+                    with print_lock:
+                        # Move to row 1 and erase to bottom of scroll region.
+                        sys.stdout.write('\x1b[1;1H\x1b[J')
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
                 if msg == '/mute':
                     self._set_all_muted(True)
                     continue
                 if msg == '/unmute':
                     self._set_all_muted(False)
+                    continue
+                if msg.startswith('/motd ') and self.is_host:
+                    self.motd = msg[6:].strip()
+                    self._broadcast(CTRL_MOTD_PREFIX + self.motd.encode('utf-8'))
+                    with print_lock:
+                        sys.stdout.write(
+                            Fore.YELLOW + Style.BRIGHT
+                            + f'MOTD updated: {self.motd}\n'
+                            + Style.RESET_ALL
+                        )
+                        ui._paint_panel()
+                        sys.stdout.flush()
                     continue
                 if msg:
                     self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))

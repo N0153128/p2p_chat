@@ -115,14 +115,17 @@ if __name__ == '__main__':
             if mode == 'l':
                 sys.stdout.write(Fore.CYAN + '  Scanning for active rooms...' + Style.RESET_ALL + '\r')
                 sys.stdout.flush()
-                room_count = discovery.scan_active_rooms(timeout=2.0)
+                rooms = discovery.scan_active_rooms(timeout=2.0)
                 sys.stdout.write('\x1b[2K')  # erase the scanning line
-                if room_count:
+                if rooms:
                     sys.stdout.write(
                         Fore.CYAN + Style.BRIGHT
-                        + f'  {room_count} active room{"s" if room_count != 1 else ""} on this network.\n'
+                        + f'  {len(rooms)} active room{"s" if len(rooms) != 1 else ""} on this network:\n'
                         + Style.RESET_ALL
                     )
+                    for sid, name in rooms:
+                        label = name if name else '(unnamed)'
+                        sys.stdout.write(Fore.WHITE + f'    · {label}\n' + Style.RESET_ALL)
                 else:
                     sys.stdout.write(
                         Fore.WHITE + '  No active rooms detected — you\'ll be the first.\n' + Style.RESET_ALL
@@ -132,6 +135,19 @@ if __name__ == '__main__':
                 if not room_code:
                     print('Room code cannot be empty.')
                     continue
+                room_name = input('Room name (optional): ').strip()
+                enable_host_str = input('Enable host mode? (y/N): ').strip().lower()
+                is_host = enable_host_str == 'y'
+                passcode = ''
+                motd = ''
+                if is_host:
+                    passcode = input('Passcode (digits only, blank = open): ').strip()
+                    if passcode and not passcode.isdigit():
+                        print('Passcode must be digits only, ignoring.')
+                        passcode = ''
+                    motd = input('Message of the day (optional): ').strip()
+                # Fold passcode into room_code for HMAC authentication.
+                effective_room_code = room_code + ':' + passcode if passcode else room_code
                 print(Fore.CYAN + Style.BRIGHT
                       + 'Waiting for peers to join your room...'
                       + Style.RESET_ALL)
@@ -140,8 +156,12 @@ if __name__ == '__main__':
                     username=username,
                     name_colour=name_colour,
                     text_colour=text_colour,
-                    room_code=room_code,
+                    room_code=effective_room_code,
                     chat_port=chat_port,
+                    is_host=is_host,
+                    room_name=room_name,
+                    motd=motd,
+                    passcode=passcode,
                 )
             elif mode == 'g':
                 peer_ip = input("Peer's public IP: ").strip()

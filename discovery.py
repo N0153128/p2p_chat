@@ -84,27 +84,28 @@ def _beacon_hmac(room_code, session_id):
 
 
 def scan_active_rooms(timeout=2.0):
-    """Listen on the discovery port and return the number of distinct active rooms.
+    """Listen on the discovery port and return a list of distinct active rooms.
 
     Collects beacons for *timeout* seconds without broadcasting anything.
-    Each unique session ID is counted as one room.  Because beacons are
-    authenticated with the room code, we cannot read the room name — only
-    that a room exists.
+    Each unique session ID is counted as one room.  The room name is decoded
+    from the beacon if present (new 4-part format); old 3-part beacons show
+    an empty name.
 
     Args:
         timeout: How long to listen in seconds.
 
     Returns:
-        Number of distinct rooms detected (int).
+        List of ``(sid, room_name)`` tuples for each distinct room detected.
     """
-    seen_sids = set()
+    import base64
+    seen = {}  # sid -> room_name
     try:
         disc = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         disc.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         disc.bind(('0.0.0.0', DISCOVERY_PORT))
         disc.settimeout(0.2)
     except OSError:
-        return 0
+        return []
 
     from time import time as _time
     deadline = _time() + timeout
@@ -120,14 +121,23 @@ def scan_active_rooms(timeout=2.0):
                 continue
             payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
             parts = payload.split(':')
-            if len(parts) != 3:
+            # Accept 3-part (old) or 4-part (new, with room_name_b64).
+            if len(parts) < 3:
                 continue
             peer_sid = parts[0]
-            if peer_sid != SESSION_ID:
-                seen_sids.add(peer_sid)
+            if peer_sid == SESSION_ID:
+                continue
+            if peer_sid not in seen:
+                room_name = ''
+                if len(parts) >= 4 and parts[3]:
+                    try:
+                        room_name = base64.urlsafe_b64decode(parts[3] + '==').decode('utf-8', errors='replace')
+                    except Exception:
+                        room_name = ''
+                seen[peer_sid] = room_name
     finally:
         disc.close()
-    return len(seen_sids)
+    return list(seen.items())
 
 
 def lan_discover(chat_port, room_code):
@@ -171,9 +181,12 @@ def lan_discover(chat_port, room_code):
                 continue
             payload = data[len(BEACON_PREFIX):].decode(errors='ignore')
             parts = payload.split(':')
-            if len(parts) != 3:
+            # Accept 3-part (old format) or 4-part (new with room_name_b64).
+            if len(parts) < 3:
                 continue
-            peer_sid, peer_port_str, peer_tag = parts
+            peer_sid = parts[0]
+            peer_port_str = parts[1]
+            peer_tag = parts[2]
             if peer_sid == SESSION_ID:
                 continue
             expected = _beacon_hmac(room_code, peer_sid)
