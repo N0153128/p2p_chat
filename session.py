@@ -339,7 +339,7 @@ class UDPClient:
             peer = self._peers.get(addr)
         if peer is None:
             return
-        username = peer.get('username') or (f'***:{addr[1]}' if self.anonymous else str(addr))
+        username = peer.get('username') or (f'***:{addr[1]}' if peer.get('anonymous') else str(addr))
         box = peer.get('box')
         if box:
             try:
@@ -362,7 +362,7 @@ class UDPClient:
             peer = self._peers.get(addr)
         if peer is None:
             return
-        username = peer.get('username') or (f'***:{addr[1]}' if self.anonymous else str(addr))
+        username = peer.get('username') or (f'***:{addr[1]}' if peer.get('anonymous') else str(addr))
         box = peer.get('box')
         if box:
             try:
@@ -414,6 +414,7 @@ class UDPClient:
                     'username': '',
                     'is_host': False,
                     'room_name': '',
+                    'anonymous': False,
                 }
         t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
         t.start()
@@ -510,11 +511,12 @@ class UDPClient:
                 pass
 
     def _send_meta_to(self, addr, box):
-        """Send our username, colour metadata, host flag, and room name to a single peer."""
+        """Send our username, colour metadata, host flag, room name, and anonymous flag to a single peer."""
         name_colour_name = next((n for n, c in COLOURS if c == self.name_colour), 'cyan')
         text_colour_name = next((n for n, c in COLOURS if c == self.text_colour), 'white')
         is_host_str = '1' if self.is_host else '0'
-        meta = f'{self.username},{name_colour_name},{text_colour_name},{is_host_str},{self.room_name}'.encode()
+        anon_str = '1' if self.anonymous else '0'
+        meta = f'{self.username},{name_colour_name},{text_colour_name},{is_host_str},{self.room_name},{anon_str}'.encode()
         try:
             self.sock.sendto(box.encrypt(CTRL_META_PREFIX + meta), addr)
             self.sock.sendto(
@@ -752,7 +754,10 @@ class UDPClient:
                     peer['connected'].set()
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
-                    peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                    # Use the peer's own anonymous flag once meta arrives; until
+                    # then fall back to masking if we ourselves are anonymous.
+                    peer_anon = peer.get('anonymous', self.anonymous)
+                    peer_display = f'***:{addr[1]}' if peer_anon else f'{addr[0]}:{addr[1]}'
                     rejoining = bool(peer.get('username'))
                     if rejoining:
                         event_msg = f'{peer["username"]} reconnected ({peer_display})'
@@ -781,7 +786,8 @@ class UDPClient:
                     peer['connected'].set()
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
-                    peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                    peer_anon = peer.get('anonymous', self.anonymous)
+                    peer_display = f'***:{addr[1]}' if peer_anon else f'{addr[0]}:{addr[1]}'
                     rejoining = bool(peer.get('username'))
                     if rejoining:
                         event_msg = f'{peer["username"]} reconnected ({peer_display})'
@@ -836,13 +842,15 @@ class UDPClient:
                 with self._peers_lock:
                     if addr in self._peers:
                         if len(parts) >= 3:
-                            # Format: username,name_colour,text_colour[,is_host,room_name]
+                            # Format: username,name_colour,text_colour[,is_host,room_name[,anonymous]]
                             self._peers[addr]['username'] = parts[0]
                             self._peers[addr]['name_colour'] = colour_for(parts[1])
                             self._peers[addr]['text_colour'] = colour_for(parts[2])
                             if len(parts) >= 5:
                                 self._peers[addr]['is_host'] = parts[3] == '1'
                                 self._peers[addr]['room_name'] = parts[4]
+                            if len(parts) >= 6:
+                                self._peers[addr]['anonymous'] = parts[5] == '1'
                         elif len(parts) == 2:
                             # Legacy format: name_colour,text_colour
                             self._peers[addr]['name_colour'] = colour_for(parts[0])
@@ -1248,7 +1256,7 @@ class UDPClient:
                 if msg == '/who':
                     with self._peers_lock:
                         connected = [
-                            (p['username'] or '???', p['name_colour'], addr)
+                            (p['username'] or '???', p['name_colour'], addr, p.get('anonymous', False))
                             for addr, p in self._peers.items()
                             if p['connected'].is_set()
                         ]
@@ -1258,8 +1266,8 @@ class UDPClient:
                            + f'  {self.username}' + Style.RESET_ALL
                            + Fore.WHITE + Style.DIM + '  (you)' + Style.RESET_ALL)
                     lines.append(you)
-                    for name, nc, addr in connected:
-                        addr_str = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                    for name, nc, addr, peer_anon in connected:
+                        addr_str = f'***:{addr[1]}' if peer_anon else f'{addr[0]}:{addr[1]}'
                         lines.append(
                             nc + Style.BRIGHT + f'  {name}' + Style.RESET_ALL
                             + Fore.WHITE + Style.DIM + f'  {addr_str}' + Style.RESET_ALL
