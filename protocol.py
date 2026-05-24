@@ -108,3 +108,16 @@ CTRL_PASSCODE_FAIL = b'__passcode_fail__'
 
 CTRL_ROOM_CLOSED = b'__room_closed__'
 """Encrypted control message sent by host to all peers when closing the room."""
+
+CTRL_ACK_PREFIX = b'__ack__:'
+"""
+Prefix for message delivery acknowledgement packets (encrypted).
+
+Full format: ``__ack__:<8-hex-msg-id>``
+
+Sent by a receiver back to the original sender upon receiving a chat
+message that carries an ``<8-hex-msg-id>|`` prefix.
+"""
+
+MSG_ACK_TIMEOUT = 5.0
+"""Seconds to wait for delivery acks before marking a message as failed."""

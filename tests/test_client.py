@@ -71,10 +71,14 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     c._tab_selected = -1
     c._banned_ips = set()
     c._max_peers = 16
+    c._muted = False
+    c.anonymous = False
     priv = nacl.public.PrivateKey.generate()
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
     c._peers_lock = threading.Lock()
+    c._ack_lock = threading.Lock()
+    c._ack_trackers = {}
     c._first_connected = threading.Event()
     connected_event = threading.Event()
     if box is not None:
@@ -670,10 +674,14 @@ class TestMultiPeer:
         c._tab_selected = -1
         c._banned_ips = set()
         c._max_peers = 16
+        c._muted = False
+        c.anonymous = False
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._ack_lock = threading.Lock()
+        c._ack_trackers = {}
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)
@@ -733,10 +741,14 @@ class TestMultiPeer:
         c._tab_selected = -1
         c._banned_ips = set()
         c._max_peers = 16
+        c._muted = False
+        c.anonymous = False
         priv = nacl.public.PrivateKey.generate()
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._ack_lock = threading.Lock()
+        c._ack_trackers = {}
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)

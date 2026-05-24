@@ -437,6 +437,78 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
         sys.stdout.flush()
 
 
+def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE):
+    """Print an outgoing message with a pending indicator and return an updater.
+
+    Prints the message followed by a dim ``⧖`` to signal delivery is awaited.
+    Returns a callable ``update(status)`` where *status* is one of:
+
+    - ``'ok'``  — replace indicator with green ``✓``
+    - ``'partial'`` — replace with yellow ``✓`` (some peers missed)
+    - ``'fail'`` — replace with red ``✗``
+
+    The updater uses cursor-up to overwrite the indicator on the same line.
+    If the line has scrolled off screen the update is silently skipped.
+    The updater is thread-safe and idempotent (only fires once).
+
+    Args:
+        username_part: The ``<Name>`` portion of the message.
+        text_part:     The body of the message.
+        name_colour:   ANSI colour code for *username_part*.
+        text_colour:   ANSI colour code for *text_part*.
+
+    Returns:
+        ``update(status)`` callable.
+    """
+    cols, rows = _term_size()
+    # Indicator sits at a fixed column near the right margin.
+    indicator_col = max(cols - 3, 1)
+    _fired = threading.Event()
+
+    with print_lock:
+        sys.stdout.write(f'\x1b[{rows - 4};1H')
+        sys.stdout.write(f'\r{" " * 80}\r')
+        line = (
+            Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
+            + text_colour + text_part + Style.RESET_ALL
+        )
+        # Pending indicator at the right margin on the same line.
+        pending = Fore.WHITE + Style.DIM + ' ⧖' + Style.RESET_ALL
+        sys.stdout.write(line + pending + '\n')
+        # Save cursor position immediately after the \n (now on the next line).
+        # We'll use cursor-up to get back to the indicator column.
+        sys.stdout.write(_SAVE_CUR)
+        _paint_panel()
+        sys.stdout.flush()
+
+    def update(status):
+        if _fired.is_set():
+            return
+        _fired.set()
+        if status == 'ok':
+            icon = Fore.GREEN + Style.BRIGHT + ' ✓' + Style.RESET_ALL
+        elif status == 'partial':
+            icon = Fore.YELLOW + Style.BRIGHT + ' ✓' + Style.RESET_ALL
+        else:
+            icon = Fore.RED + Style.BRIGHT + ' ✗' + Style.RESET_ALL
+        with print_lock:
+            # Restore to the saved position (line after the message),
+            # go up 1 line, move to indicator column, overwrite.
+            sys.stdout.write(
+                _REST_CUR
+                + '\x1b[1A'                              # up one line
+                + f'\x1b[{indicator_col}G'               # move to column
+                + '\x1b[2K\x1b[0G'                       # erase rest of line ... actually just overwrite
+                + f'\x1b[{indicator_col}G'
+                + icon
+                + _SAVE_CUR                              # update saved pos so future repaints still work
+            )
+            _paint_panel()
+            sys.stdout.flush()
+
+    return update
+
+
 # ---------------------------------------------------------------------------
 # Startup colour picker
 # ---------------------------------------------------------------------------

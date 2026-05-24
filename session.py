@@ -47,6 +47,7 @@ joiners).  All other packet types require the source to be a known peer.
 """
 
 import os
+import random
 import shutil
 import signal
 import sys
@@ -61,6 +62,7 @@ import discovery
 from protocol import (
     BEACON_PREFIX,
     BROADCAST_INTERVAL,
+    CTRL_ACK_PREFIX,
     CTRL_BAN_PREFIX,
     CTRL_DISCONNECT,
     CTRL_KICK_PREFIX,
@@ -68,6 +70,7 @@ from protocol import (
     CTRL_MOTD_PREFIX,
     CTRL_ROOM_CLOSED,
     MAX_PEERS,
+    MSG_ACK_TIMEOUT,
     PUNCH_ACK_PREFIX,
     PUNCH_BAN,
     PUNCH_INTERVAL,
@@ -76,6 +79,60 @@ from protocol import (
 )
 import ui
 from ui import COLOURS, colour_for, print_lock
+
+
+class _MsgTracker:
+    """Track delivery acks for a single outgoing message.
+
+    Created when a message is sent.  Each connected peer at send-time is
+    added as a pending recipient.  As acks arrive, peers are removed.
+    When all acks are received, or MSG_ACK_TIMEOUT elapses, the visual
+    status indicator on the message line is updated.
+
+    Args:
+        msg_id:      8-hex-char message ID string.
+        peer_addrs:  Iterable of ``(ip, port)`` for every peer the message
+                     was sent to.
+        update_fn:   Callable returned by ``ui.print_msg_pending``; called
+                     with ``'ok'``, ``'partial'``, or ``'fail'``.
+    """
+
+    def __init__(self, msg_id, peer_addrs, update_fn):
+        self._id = msg_id
+        self._pending = set(peer_addrs)
+        self._total = len(self._pending)
+        self._update = update_fn
+        self._lock = threading.Lock()
+        self._done = False
+        if not self._pending:
+            # No peers — nothing to wait for.
+            update_fn('ok')
+            self._done = True
+        else:
+            t = threading.Timer(MSG_ACK_TIMEOUT, self._timeout)
+            t.daemon = True
+            t.start()
+
+    def ack(self, addr):
+        """Record an ack from *addr*.  Resolves immediately if all acks received."""
+        with self._lock:
+            if self._done:
+                return
+            self._pending.discard(addr)
+            if not self._pending:
+                self._done = True
+                self._update('ok')
+
+    def _timeout(self):
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+            missed = len(self._pending)
+            if missed == self._total:
+                self._update('fail')
+            else:
+                self._update('partial')
 
 
 class UDPClient:
@@ -142,6 +199,10 @@ class UDPClient:
 
         # first_connected is set the moment any peer completes the handshake.
         self._first_connected = threading.Event()
+
+        # Pending delivery trackers keyed by msg_id.
+        self._ack_trackers: dict[str, _MsgTracker] = {}
+        self._ack_lock = threading.Lock()
 
         self._prev_sigint = signal.signal(signal.SIGINT, self._handle_sigint)
 
@@ -704,6 +765,15 @@ class UDPClient:
                              name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
                 continue
 
+            # Delivery ack from a peer for one of our outgoing messages.
+            if plaintext.startswith(CTRL_ACK_PREFIX):
+                msg_id = plaintext[len(CTRL_ACK_PREFIX):].decode('ascii', errors='ignore')
+                with self._ack_lock:
+                    tracker = self._ack_trackers.get(msg_id)
+                if tracker:
+                    tracker.ack(addr)
+                continue
+
             with self._peers_lock:
                 peer = self._peers.get(addr, {})
             name_colour = peer.get('name_colour', Fore.CYAN)
@@ -711,6 +781,25 @@ class UDPClient:
             muted = peer.get('muted', False)
 
             text = plaintext.decode('utf-8', errors='replace')
+
+            # Strip the optional ``<msg_id>|`` prefix and send an ack back.
+            msg_id = None
+            if len(text) >= 9 and text[8] == '|':
+                candidate = text[:8]
+                if all(c in '0123456789abcdef' for c in candidate):
+                    msg_id = candidate
+                    text = text[9:]
+            if msg_id is not None:
+                with self._peers_lock:
+                    box = self._peers.get(addr, {}).get('box')
+                if box:
+                    try:
+                        self.sock.sendto(
+                            box.encrypt(CTRL_ACK_PREFIX + msg_id.encode()), addr
+                        )
+                    except Exception:
+                        pass
+
             if text.startswith('<') and '>: ' in text:
                 split_at = text.index('>: ')
                 name_part = text[:split_at + 1]
@@ -953,12 +1042,29 @@ class UDPClient:
                     self.done.set()
                     break
                 if msg:
-                    self._broadcast(f'<{self.username}>: {msg}'.encode('utf-8'))
-                    ui.print_msg(
+                    msg_id = '%08x' % random.getrandbits(32)
+                    wire = f'{msg_id}|<{self.username}>: {msg}'.encode('utf-8')
+                    with self._peers_lock:
+                        targets = [
+                            addr for addr, p in self._peers.items()
+                            if p['box'] is not None and p['connected'].is_set()
+                        ]
+                    for addr in targets:
+                        with self._peers_lock:
+                            box = self._peers[addr]['box']
+                        if box:
+                            try:
+                                self.sock.sendto(box.encrypt(wire), addr)
+                            except Exception:
+                                pass
+                    update_fn = ui.print_msg_pending(
                         f'(you) <{self.username}>',
                         f': {msg}',
                         name_colour=self.name_colour,
                         text_colour=self.text_colour,
                     )
+                    tracker = _MsgTracker(msg_id, targets, update_fn)
+                    with self._ack_lock:
+                        self._ack_trackers[msg_id] = tracker
         except (KeyboardInterrupt, EOFError):
             pass
