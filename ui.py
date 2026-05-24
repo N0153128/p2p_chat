@@ -430,16 +430,30 @@ def print_history(messages):
     # Clear the scroll region, then write history from the top so messages
     # fill downward and scroll naturally.  Repaint the panel afterwards so
     # the separator/input/status rows are intact.
-    sys.stdout.write('\x1b[1;1H\x1b[J')   # go to row 1, erase to bottom of scroll region
-    sys.stdout.write(header + '\r\n')
+    cols, rows = _term_size()
+    scroll_rows = rows - 4  # height of the scroll region (rows 1..rows-4)
+
+    # Build all lines first so we know how many there are.
+    lines = [header]
     for m in messages:
         ts = Fore.WHITE + Style.DIM + m['ts'] + Style.RESET_ALL
         nc = colour_for(m.get('name_colour', 'white'))
         tc = colour_for(m.get('text_colour', 'white'))
         sender = Style.BRIGHT + nc + m['sender'] + Style.RESET_ALL
         body = tc + m['body'] + Style.RESET_ALL
-        sys.stdout.write(f'{ts}  {sender}{body}\r\n')
-    sys.stdout.write(dim_line + '\r\n')
+        lines.append(f'{ts}  {sender}{body}')
+    lines.append(dim_line)
+
+    # Only keep as many lines as fit in the scroll region (older ones scroll off).
+    visible = lines[-scroll_rows:] if len(lines) > scroll_rows else lines
+
+    # Position so the last visible line lands at rows-4 (bottom of scroll region),
+    # leaving no gap between history and live chat.
+    start_row = max(1, scroll_rows - len(visible) + 1)
+    sys.stdout.write('\x1b[1;1H\x1b[J')  # clear the scroll region
+    sys.stdout.write(f'\x1b[{start_row};1H')
+    for line in visible:
+        sys.stdout.write(line + '\r\n')
     _paint_panel()
     sys.stdout.flush()
 
