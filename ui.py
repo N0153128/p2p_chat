@@ -406,6 +406,37 @@ def redraw_statusbar():
         sys.stdout.flush()
 
 
+def print_history(messages):
+    """Replay stored history messages into the scroll region.
+
+    Prints a dim divider, then each message as ``HH:MM  sender: body``,
+    then a second divider marking where live chat begins.  Must be called
+    after enable_statusbar() and while print_lock is held.
+
+    Args:
+        messages: List of dicts with keys ``sender``, ``body``, ``ts``,
+                  as returned by ``db.load_history()``.
+    """
+    if not messages:
+        return
+    cols, rows = _term_size()
+    dim_line = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
+    label = ' chat history '
+    pad = (cols - len(label)) // 2
+    header = (Fore.WHITE + Style.DIM
+              + '─' * pad + label + '─' * (cols - pad - len(label))
+              + Style.RESET_ALL)
+    sys.stdout.write(f'\x1b[{rows - 4};1H')
+    sys.stdout.write(header + '\n')
+    for m in messages:
+        ts = Fore.WHITE + Style.DIM + m['ts'] + Style.RESET_ALL
+        sender = Style.BRIGHT + m['sender'] + Style.RESET_ALL
+        body = m['body']
+        sys.stdout.write(f'{ts}  {sender}: {body}\n')
+    sys.stdout.write(dim_line + '\n')
+    sys.stdout.flush()
+
+
 def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.WHITE, alert=False):
     """Print an incoming chat message and repaint the input panel.
 

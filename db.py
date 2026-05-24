@@ -15,15 +15,31 @@ Tables
 
 ``user_settings``
     Per-user preference flags (e.g. mute state).  One row per key.
+
+``message_log``
+    Rolling chat history, capped at ``MSG_LOG_LIMIT`` rows per room.
+    Keyed by room name.  Messages are stored as plain text (ANSI stripped).
+    Oldest rows are pruned on every insert to stay within the cap.
 """
 
 import os
+import re
 import sqlite3
 
 import nacl.secret
 import nacl.utils
 
 DB_PATH = os.path.expanduser('~/.p2p_chat.db')
+
+MSG_LOG_LIMIT = 2000
+"""Maximum number of messages retained per room in message_log."""
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKHJrABCDsu]|\x1b[78]')
+
+
+def _strip_ansi(text):
+    """Remove ANSI escape sequences from *text* for plain-text storage."""
+    return _ANSI_RE.sub('', text)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +73,16 @@ def _init(conn):
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS message_log (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            room      TEXT    NOT NULL,
+            sender    TEXT    NOT NULL,
+            body      TEXT    NOT NULL,
+            ts        TEXT    DEFAULT (strftime('%H:%M', 'now', 'localtime'))
+        );
+
+        CREATE INDEX IF NOT EXISTS message_log_room ON message_log(room, id);
     """)
     conn.commit()
 
@@ -203,3 +229,63 @@ def set_setting(key, value):
     )
     conn.commit()
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Message log
+# ---------------------------------------------------------------------------
+
+def log_message(room, sender, body):
+    """Append a message to the rolling log for *room*.
+
+    ANSI codes are stripped before storage.  If the room's row count
+    exceeds MSG_LOG_LIMIT the oldest rows are pruned immediately.
+
+    Args:
+        room:   Room name string used as the partition key.
+        sender: Display name of the sender (plain text).
+        body:   Message body text (plain text or ANSI — ANSI is stripped).
+    """
+    if not room:
+        return
+    conn = _connect()
+    _init(conn)
+    conn.execute(
+        "INSERT INTO message_log (room, sender, body) VALUES (?, ?, ?)",
+        (room, _strip_ansi(sender), _strip_ansi(body)),
+    )
+    # Prune oldest rows beyond the cap for this room.
+    conn.execute(
+        """DELETE FROM message_log WHERE room=? AND id NOT IN (
+               SELECT id FROM message_log WHERE room=?
+               ORDER BY id DESC LIMIT ?
+           )""",
+        (room, room, MSG_LOG_LIMIT),
+    )
+    conn.commit()
+    conn.close()
+
+
+def load_history(room, limit=MSG_LOG_LIMIT):
+    """Return the most recent *limit* messages for *room*, oldest first.
+
+    Args:
+        room:  Room name string.
+        limit: Maximum number of rows to return.
+
+    Returns:
+        List of dicts with keys: ``sender``, ``body``, ``ts``.
+    """
+    if not room:
+        return []
+    conn = _connect()
+    _init(conn)
+    rows = conn.execute(
+        """SELECT sender, body, ts FROM (
+               SELECT sender, body, ts, id FROM message_log
+               WHERE room=? ORDER BY id DESC LIMIT ?
+           ) ORDER BY id ASC""",
+        (room, limit),
+    ).fetchall()
+    conn.close()
+    return [{'sender': r['sender'], 'body': r['body'], 'ts': r['ts']} for r in rows]

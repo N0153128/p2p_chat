@@ -247,6 +247,10 @@ class UDPClient:
         ui.get_statusbar = self._statusbar
         with print_lock:
             ui.enable_statusbar()
+            if self.room_name:
+                history = db.load_history(self.room_name)
+                if history:
+                    ui.print_history(history)
             sys.stdout.flush()
         self._panel_disabled = False
         self.done.wait()
@@ -306,6 +310,10 @@ class UDPClient:
                + '  ' + count + '  ' + names + '  '
                + Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL)
         return bar
+
+    def _log(self, sender, body):
+        """Append a message to the room's history log (no-op if no room name)."""
+        db.log_message(self.room_name, sender, body)
 
     def _redraw_statusbar(self):
         """Repaint the full bottom panel from any thread (acquires print_lock)."""
@@ -652,15 +660,17 @@ class UDPClient:
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
                     peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                    join_msg = f'Peer joined! ({peer_display}, encrypted)'
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Peer joined! ({peer_display}, encrypted)\n'
+                            + join_msg + '\n'
                             + Style.RESET_ALL
                         )
                         ui._paint_panel()
                         sys.stdout.flush()
+                    self._log('', join_msg)
                 continue
 
             if data.startswith(PUNCH_ACK_PREFIX):
@@ -675,15 +685,17 @@ class UDPClient:
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
                     peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                    join_msg = f'Peer joined! ({peer_display}, encrypted)'
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
                             + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + f'Peer joined! ({peer_display}, encrypted)\n'
+                            + join_msg + '\n'
                             + Style.RESET_ALL
                         )
                         ui._paint_panel()
                         sys.stdout.flush()
+                    self._log('', join_msg)
                 continue
 
             with self._peers_lock:
@@ -700,23 +712,19 @@ class UDPClient:
                 with self._peers_lock:
                     self._peers.pop(addr, None)
                     remaining = len(self._peers)
+                left_msg = ('A peer left.'
+                            + (f'  ({remaining} peer{"s" if remaining != 1 else ""} remaining)'
+                               if remaining else ''))
                 with print_lock:
                     sys.stdout.write(f'\r{" " * 80}\r')
                     sys.stdout.write(
-                        Fore.LIGHTYELLOW_EX + Style.BRIGHT
-                        + 'A peer left.'
-                        + (f'  ({remaining} peer{"s" if remaining != 1 else ""} remaining)'
-                           if remaining else '')
-                        + '\n' + Style.RESET_ALL
+                        Fore.LIGHTYELLOW_EX + Style.BRIGHT + left_msg + '\n' + Style.RESET_ALL
                     )
                     ui._paint_panel()
                     sys.stdout.flush()
+                self._log('', left_msg)
                 self.peer_disconnected = True
-                # Only end the session if no peers remain AND discovery is done.
-                # In LAN mode, done is never set here — the room stays open.
                 if remaining == 0 and not self.done.is_set():
-                    # In internet mode (no background discovery), end the session.
-                    # In LAN mode, keep waiting — _discover_loop will find new peers.
                     pass
                 continue
 
@@ -744,18 +752,21 @@ class UDPClient:
             if plaintext == CTRL_KICK_PREFIX:
                 ui.print_msg('', Fore.RED + Style.BRIGHT + 'You were kicked from the room.' + Style.RESET_ALL,
                              name_colour='', text_colour='')
+                self._log('', 'You were kicked from the room.')
                 self.done.set()
                 continue
 
             if plaintext == CTRL_BAN_PREFIX:
                 ui.print_msg('', Fore.RED + Style.BRIGHT + 'You were banned from the room.' + Style.RESET_ALL,
                              name_colour='', text_colour='')
+                self._log('', 'You were banned from the room.')
                 self.done.set()
                 continue
 
             if plaintext == CTRL_ROOM_CLOSED:
                 ui.print_msg('', Fore.RED + Style.BRIGHT + 'The host closed the room.' + Style.RESET_ALL,
                              name_colour='', text_colour='')
+                self._log('', 'The host closed the room.')
                 self.done.set()
                 continue
 
@@ -763,6 +774,7 @@ class UDPClient:
                 motd = plaintext[len(CTRL_MOTD_PREFIX):].decode('utf-8', errors='replace')
                 ui.print_msg('', f'📢 MOTD: {motd}',
                              name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
+                self._log('', f'📢 MOTD: {motd}')
                 continue
 
             # Delivery ack from a peer for one of our outgoing messages.
@@ -806,9 +818,11 @@ class UDPClient:
                 body_part = text[split_at + 2:]
                 ui.print_msg(name_part, body_part,
                              name_colour=name_colour, text_colour=text_colour, alert=not muted)
+                self._log(name_part, body_part)
             else:
                 ui.print_msg('', text,
                              name_colour=name_colour, text_colour=text_colour, alert=not muted)
+                self._log('', text)
 
         try:
             self.sock.settimeout(None)
@@ -1066,5 +1080,6 @@ class UDPClient:
                     tracker = _MsgTracker(msg_id, targets, update_fn)
                     with self._ack_lock:
                         self._ack_trackers[msg_id] = tracker
+                    self._log(f'(you) <{self.username}>', f': {msg}')
         except (KeyboardInterrupt, EOFError):
             pass
