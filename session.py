@@ -194,9 +194,11 @@ class UDPClient:
         self._pubkey_bytes = bytes(self._privkey.public_key)
 
         # Per-peer state keyed by (ip, port).
-        # {'box': Box|None, 'connected': Event, 'name_colour': code, 'text_colour': code}
+        # {'box': Box|None, 'connected': Event, 'name_colour': code, 'text_colour': code, ...}
         self._peers_lock = threading.Lock()
         self._peers = {}
+        # Maps pubkey fingerprint (16-hex) → current (ip, port) for reconnect detection.
+        self._peer_by_pubkey: dict[str, tuple] = {}
 
         # first_connected is set the moment any peer completes the handshake.
         self._first_connected = threading.Event()
@@ -377,28 +379,51 @@ class UDPClient:
     # Peer management
     # ------------------------------------------------------------------
 
-    def _add_peer(self, addr):
+    def _add_peer(self, addr, carry=None):
         """Register *addr* as a known peer and start punching to it.
 
         No-op if the peer is already known or the room is full.
         Returns True if the peer was newly added.
+
+        Args:
+            addr:  ``(ip, port)`` tuple.
+            carry: Optional existing peer dict to reuse (reconnect case) — the
+                   dict is reset for a fresh handshake while preserving display
+                   info like username and colours.
         """
         with self._peers_lock:
             if addr in self._peers or len(self._peers) >= self._max_peers - 1:
                 return False
-            self._peers[addr] = {
-                'box': None,
-                'connected': threading.Event(),
-                'name_colour': Fore.CYAN,
-                'text_colour': Fore.WHITE,
-                'muted': self._muted,
-                'username': '',
-                'is_host': False,
-                'room_name': '',
-            }
+            if carry:
+                # Reconnecting peer: reset handshake state, keep display info.
+                carry['box'] = None
+                carry['connected'] = threading.Event()
+                self._peers[addr] = carry
+            else:
+                self._peers[addr] = {
+                    'box': None,
+                    'connected': threading.Event(),
+                    'name_colour': Fore.CYAN,
+                    'text_colour': Fore.WHITE,
+                    'muted': self._muted,
+                    'username': '',
+                    'is_host': False,
+                    'room_name': '',
+                }
         t = threading.Thread(target=self._punch, args=(addr,), daemon=True)
         t.start()
         return True
+
+    def _remove_unconnected_peer(self, addr):
+        """Remove a peer that never completed the handshake, freeing its slot."""
+        with self._peers_lock:
+            peer = self._peers.get(addr)
+            if peer and not peer['connected'].is_set():
+                self._peers.pop(addr, None)
+                # Also remove from pubkey index if still pointing at this addr.
+                stale = [fp for fp, a in self._peer_by_pubkey.items() if a == addr]
+                for fp in stale:
+                    self._peer_by_pubkey.pop(fp, None)
 
     # ------------------------------------------------------------------
     # Signal handling
@@ -431,15 +456,35 @@ class UDPClient:
         return PUNCH_ACK_PREFIX + self._pubkey_bytes.hex().encode()
 
     def _build_box(self, addr, peer_pubkey_hex):
-        """Build and store the Box for *addr*. Returns the Box, or None on error."""
+        """Build and store the Box for *addr*.
+
+        Also maintains the pubkey→addr index for reconnect detection.
+        If the pubkey is already known at a *different* address, the stale
+        peer entry is migrated to the new address before the box is built.
+
+        Returns the Box, or None on error.
+        """
         try:
             peer_pub = nacl.public.PublicKey(bytes.fromhex(peer_pubkey_hex))
             box = nacl.public.Box(self._privkey, peer_pub)
         except Exception:
             return None
+
+        fp = peer_pubkey_hex[:16]
+
         with self._peers_lock:
+            old_addr = self._peer_by_pubkey.get(fp)
+            if old_addr and old_addr != addr and old_addr in self._peers:
+                # Same peer, new address — migrate the peer dict.
+                peer_dict = self._peers.pop(old_addr)
+                peer_dict['box'] = None
+                peer_dict['connected'] = threading.Event()
+                self._peers[addr] = peer_dict
+            self._peer_by_pubkey[fp] = addr
             if addr in self._peers:
                 self._peers[addr]['box'] = box
+                self._peers[addr]['pubkey_fp'] = fp
+
         return box
 
     def _broadcast(self, plaintext):
@@ -479,7 +524,11 @@ class UDPClient:
     # ------------------------------------------------------------------
 
     def _punch(self, addr):
-        """Send PUNCH packets to *addr* until connected, done, or timed out."""
+        """Send PUNCH packets to *addr* until connected, done, or timed out.
+
+        On timeout without a successful handshake, removes the peer entry so
+        the slot is freed for future joiners.
+        """
         with self._peers_lock:
             peer = self._peers.get(addr)
         if peer is None:
@@ -491,6 +540,8 @@ class UDPClient:
             except Exception:
                 pass
             sleep(PUNCH_INTERVAL)
+        if not peer['connected'].is_set() and not self.done.is_set():
+            self._remove_unconnected_peer(addr)
 
     def _discover_loop(self, chat_port, room_code):
         """Broadcast LAN beacons and add peers for the life of the room.
@@ -518,7 +569,9 @@ class UDPClient:
             f'{discovery.SESSION_ID}:{chat_port}:{tag}'
             f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}:{self._max_peers}'
         ).encode()
-        seen_sids = set()
+        # Maps peer session ID → last seen (ip, port).  Used to detect
+        # reconnects where a peer reappears at a new address.
+        seen_sids: dict[str, tuple] = {}
 
         try:
             disc = socklib.socket(socklib.AF_INET, socklib.SOCK_DGRAM)
@@ -557,7 +610,7 @@ class UDPClient:
                 peer_tag = parts[2]
                 # parts[3] is room_name_b64 if present (informational only).
 
-                if peer_sid == discovery.SESSION_ID or peer_sid in seen_sids:
+                if peer_sid == discovery.SESSION_ID:
                     continue
 
                 expected = discovery._beacon_hmac(room_code, peer_sid)
@@ -569,14 +622,29 @@ class UDPClient:
                 except ValueError:
                     continue
 
-                seen_sids.add(peer_sid)
                 peer_addr = (addr[0], peer_port)
 
                 with self._peers_lock:
-                    already_known = peer_addr in self._peers
+                    already_at_addr = peer_addr in self._peers
                     full = len(self._peers) >= self._max_peers - 1
+                    # Check if this sid was seen before at a different address
+                    # (peer reconnected from a new IP/port after a drop).
+                    prev_addr = seen_sids.get(peer_sid)
+                    reconnecting = (
+                        prev_addr is not None
+                        and prev_addr != peer_addr
+                        and prev_addr in self._peers
+                        and not self._peers[prev_addr]['connected'].is_set()
+                    )
+                    carry = None
+                    if reconnecting:
+                        carry = self._peers.pop(prev_addr)
 
-                if already_known or full:
+                seen_sids[peer_sid] = peer_addr
+
+                if already_at_addr:
+                    continue
+                if full and not reconnecting:
                     continue
 
                 # Unicast our beacon back so the peer sees us too.
@@ -585,7 +653,7 @@ class UDPClient:
                 except Exception:
                     pass
 
-                self._add_peer(peer_addr)
+                self._add_peer(peer_addr, carry=carry)
 
         finally:
             disc.close()
@@ -637,11 +705,23 @@ class UDPClient:
                 known = addr in self._peers
                 full = len(self._peers) >= self._max_peers - 1
 
-            # Accept PUNCH from unknown addresses: this is a late joiner
-            # punching us first (common when we sent them a beacon reply).
+            # Accept PUNCH from unknown addresses: late joiner or reconnecting peer.
             if not known:
-                if data.startswith(PUNCH_PREFIX) and not full:
-                    self._add_peer(addr)
+                if data.startswith(PUNCH_PREFIX):
+                    # Check if this is a known pubkey at a new address (reconnect).
+                    peer_pubkey_hex = data[len(PUNCH_PREFIX):].decode(errors='ignore')
+                    fp = peer_pubkey_hex[:16]
+                    with self._peers_lock:
+                        old_addr = self._peer_by_pubkey.get(fp)
+                        carry = None
+                        if old_addr and old_addr != addr and old_addr in self._peers:
+                            carry = self._peers.pop(old_addr)
+                    if carry is not None:
+                        self._add_peer(addr, carry=carry)
+                    elif not full:
+                        self._add_peer(addr)
+                    else:
+                        continue
                 else:
                     continue
 
@@ -661,17 +741,21 @@ class UDPClient:
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
                     peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
-                    join_msg = f'Peer joined! ({peer_display}, encrypted)'
+                    rejoining = bool(peer.get('username'))
+                    if rejoining:
+                        event_msg = f'{peer["username"]} reconnected ({peer_display})'
+                        colour = Fore.YELLOW
+                    else:
+                        event_msg = f'Peer joined! ({peer_display}, encrypted)'
+                        colour = Fore.LIGHTGREEN_EX
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
-                            + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + join_msg + '\n'
-                            + Style.RESET_ALL
+                            + colour + Style.BRIGHT + event_msg + '\n' + Style.RESET_ALL
                         )
                         ui._paint_panel()
                         sys.stdout.flush()
-                    self._log('', join_msg)
+                    self._log('', event_msg)
                 continue
 
             if data.startswith(PUNCH_ACK_PREFIX):
@@ -686,17 +770,21 @@ class UDPClient:
                     self._first_connected.set()
                     self._send_meta_to(addr, box)
                     peer_display = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
-                    join_msg = f'Peer joined! ({peer_display}, encrypted)'
+                    rejoining = bool(peer.get('username'))
+                    if rejoining:
+                        event_msg = f'{peer["username"]} reconnected ({peer_display})'
+                        colour = Fore.YELLOW
+                    else:
+                        event_msg = f'Peer joined! ({peer_display}, encrypted)'
+                        colour = Fore.LIGHTGREEN_EX
                     with print_lock:
                         sys.stdout.write(
                             f'\r{" " * 80}\r'
-                            + Fore.LIGHTGREEN_EX + Style.BRIGHT
-                            + join_msg + '\n'
-                            + Style.RESET_ALL
+                            + colour + Style.BRIGHT + event_msg + '\n' + Style.RESET_ALL
                         )
                         ui._paint_panel()
                         sys.stdout.flush()
-                    self._log('', join_msg)
+                    self._log('', event_msg)
                 continue
 
             with self._peers_lock:

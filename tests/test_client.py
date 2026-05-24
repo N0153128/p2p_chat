@@ -77,6 +77,7 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
     c._privkey = priv
     c._pubkey_bytes = bytes(priv.public_key)
     c._peers_lock = threading.Lock()
+    c._peer_by_pubkey = {}
     c._ack_lock = threading.Lock()
     c._ack_trackers = {}
     c._first_connected = threading.Event()
@@ -624,7 +625,7 @@ class TestDisconnect:
 class TestPunchTimeout:
 
     def test_punch_stops_after_timeout(self):
-        """_punch stops sending after PUNCH_TIMEOUT expires."""
+        """_punch stops sending after PUNCH_TIMEOUT and removes the unconnected peer."""
         sock_a = make_udp_sock()
         remote = ('127.0.0.1', 9999)
         c = make_client_obj(sock_a, remote_addr=remote)
@@ -638,10 +639,11 @@ class TestPunchTimeout:
         finally:
             protocol.PUNCH_TIMEOUT = original
 
+        # Peer that never connected should be removed from the dict.
         with c._peers_lock:
-            connected = c._peers[remote]['connected'].is_set()
+            still_present = remote in c._peers
         assert elapsed >= 1
-        assert not connected
+        assert not still_present
         sock_a.close()
 
 
@@ -680,6 +682,7 @@ class TestMultiPeer:
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._peer_by_pubkey = {}
         c._ack_lock = threading.Lock()
         c._ack_trackers = {}
         c._first_connected = threading.Event()
@@ -747,6 +750,7 @@ class TestMultiPeer:
         c._privkey = priv
         c._pubkey_bytes = bytes(priv.public_key)
         c._peers_lock = threading.Lock()
+        c._peer_by_pubkey = {}
         c._ack_lock = threading.Lock()
         c._ack_trackers = {}
         c._first_connected = threading.Event()
