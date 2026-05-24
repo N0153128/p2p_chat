@@ -64,6 +64,7 @@ from protocol import (
     BROADCAST_INTERVAL,
     CTRL_ACK_PREFIX,
     CTRL_BAN_PREFIX,
+    CTRL_NICK_PREFIX,
     CTRL_DISCONNECT,
     CTRL_KICK_PREFIX,
     CTRL_META_PREFIX,
@@ -777,6 +778,19 @@ class UDPClient:
                 self._log('', f'📢 MOTD: {motd}')
                 continue
 
+            if plaintext.startswith(CTRL_NICK_PREFIX):
+                payload = plaintext[len(CTRL_NICK_PREFIX):].decode('utf-8', errors='replace')
+                if '\t' in payload:
+                    old_name, new_name = payload.split('\t', 1)
+                    with self._peers_lock:
+                        if addr in self._peers:
+                            self._peers[addr]['username'] = new_name
+                    notice = f'{old_name} is now known as {new_name}'
+                    ui.print_msg('', notice, name_colour=Fore.CYAN, text_colour=Fore.CYAN)
+                    self._log('', notice)
+                    self._redraw_statusbar()
+                continue
+
             # Delivery ack from a peer for one of our outgoing messages.
             if plaintext.startswith(CTRL_ACK_PREFIX):
                 msg_id = plaintext[len(CTRL_ACK_PREFIX):].decode('ascii', errors='ignore')
@@ -867,6 +881,47 @@ class UDPClient:
         tty.setraw(fd)
         buf = []
 
+        _ALL_COMMANDS = [
+            '/exit', '/clear', '/nick', '/mute', '/unmute',
+            '/motd', '/close', '/save_preset', '/dump_presets',
+            '/wipe_presets', '/help',
+        ]
+        _suggestion_rows = [0]  # mutable cell: how many overlay rows currently shown
+
+        def _update_suggestions():
+            """Paint or clear the command suggestion overlay above the separator."""
+            text = ''.join(buf)
+            cols, rows = ui._term_size()
+            sep_row = rows - 3  # the separator row above input
+
+            # Clear previous overlay rows.
+            n_prev = _suggestion_rows[0]
+            if n_prev:
+                for r in range(sep_row - n_prev, sep_row):
+                    sys.stdout.write(f'\x1b[{r};1H\x1b[2K')
+                _suggestion_rows[0] = 0
+
+            if not text.startswith('/') or text == '/':
+                return
+
+            matches = [c for c in _ALL_COMMANDS if c.startswith(text.split()[0])][:5]
+            if not matches:
+                return
+
+            start_row = sep_row - len(matches)
+            for i, cmd in enumerate(matches):
+                row = start_row + i
+                if row < 1:
+                    continue
+                highlight = (i == 0)
+                if highlight:
+                    line = (Fore.BLACK + '\x1b[47m'  # white bg
+                            + f'  {cmd:<20}' + Style.RESET_ALL)
+                else:
+                    line = Fore.CYAN + Style.DIM + f'  {cmd}' + Style.RESET_ALL
+                sys.stdout.write(f'\x1b[{row};1H\x1b[2K' + line)
+            _suggestion_rows[0] = len(matches)
+
         # Register a hook so print_msg can redraw our input line after
         # printing an incoming message (otherwise the prompt is left blank
         # and the buffer content is invisible).
@@ -885,6 +940,14 @@ class UDPClient:
                     raise KeyboardInterrupt
                 if ch in ('\r', '\n'):              # Enter
                     self._tab_selected = -1
+                    if _suggestion_rows[0]:
+                        cols, rows = ui._term_size()
+                        sep_row = rows - 3
+                        with print_lock:
+                            for r in range(sep_row - _suggestion_rows[0], sep_row):
+                                sys.stdout.write(f'\x1b[{r};1H\x1b[2K')
+                            _suggestion_rows[0] = 0
+                            sys.stdout.flush()
                     return ''.join(buf)
                 if ch == '\t':                      # Tab — cycle through peers
                     with self._peers_lock:
@@ -900,9 +963,11 @@ class UDPClient:
                             ui._paint_panel()
                             sys.stdout.flush()
                     continue
-                if ch == '\x1b':                    # Escape — clear tab selection
+                if ch == '\x1b':                    # Escape — clear tab selection + suggestions
                     self._tab_selected = -1
+                    buf.clear()
                     with print_lock:
+                        _update_suggestions()
                         ui._paint_panel()
                         sys.stdout.flush()
                     continue
@@ -939,6 +1004,7 @@ class UDPClient:
                         buf.pop()
                         with print_lock:
                             sys.stdout.write('\b \b')
+                            _update_suggestions()
                             sys.stdout.flush()
                 else:
                     buf.append(ch)
@@ -946,8 +1012,17 @@ class UDPClient:
                         sys.stdout.write(
                             self.text_colour + ch + Style.RESET_ALL
                         )
+                        _update_suggestions()
                         sys.stdout.flush()
         finally:
+            # Clear any lingering suggestion overlay before releasing the terminal.
+            if _suggestion_rows[0]:
+                cols, rows = ui._term_size()
+                sep_row = rows - 3
+                with print_lock:
+                    for r in range(sep_row - _suggestion_rows[0], sep_row):
+                        sys.stdout.write(f'\x1b[{r};1H\x1b[2K')
+                    sys.stdout.flush()
             ui.get_input_redraw = None
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -1041,6 +1116,56 @@ class UDPClient:
                             + f'Preset saved: "{self.room_name}"\n'
                             + Style.RESET_ALL
                         )
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                if msg.startswith('/nick '):
+                    new_name = msg[6:].strip()
+                    if not new_name:
+                        ui.print_msg('', 'Usage: /nick <new name>',
+                                     name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
+                    elif new_name == self.username:
+                        ui.print_msg('', 'That is already your name.',
+                                     name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
+                    else:
+                        old_name = self.username
+                        self.username = new_name
+                        notice = f'{old_name} is now known as {new_name}'
+                        self._broadcast(
+                            CTRL_NICK_PREFIX
+                            + f'{old_name}\t{new_name}'.encode('utf-8')
+                        )
+                        ui.print_msg('', notice,
+                                     name_colour=Fore.CYAN, text_colour=Fore.CYAN)
+                        self._log('', notice)
+                        with print_lock:
+                            ui._paint_panel()
+                            sys.stdout.flush()
+                    continue
+                if msg == '/help':
+                    _HELP = [
+                        ('/exit',            'Leave the room'),
+                        ('/clear',           'Clear chat on your screen'),
+                        ('/nick <name>',     'Change your display name'),
+                        ('/mute',            'Silence notification sounds'),
+                        ('/unmute',          'Restore notification sounds'),
+                        ('/motd <text>',     'Set message of the day  [host]'),
+                        ('/close',           'Close the room           [host]'),
+                        ('/save_preset',     'Save room as a preset    [host]'),
+                        ('/dump_presets',    'Export presets to a file'),
+                        ('/wipe_presets',    'Delete all presets'),
+                        ('/help',            'Show this list'),
+                    ]
+                    with print_lock:
+                        sys.stdout.write(f'\x1b[{ui._term_size()[1] - 4};1H')
+                        sys.stdout.write(
+                            Fore.WHITE + Style.DIM + '─── commands ───\n' + Style.RESET_ALL
+                        )
+                        for cmd, desc in _HELP:
+                            sys.stdout.write(
+                                Fore.CYAN + Style.BRIGHT + f'  {cmd:<20}' + Style.RESET_ALL
+                                + Fore.WHITE + desc + '\n' + Style.RESET_ALL
+                            )
                         ui._paint_panel()
                         sys.stdout.flush()
                     continue

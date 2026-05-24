@@ -109,6 +109,15 @@ CTRL_PASSCODE_FAIL = b'__passcode_fail__'
 CTRL_ROOM_CLOSED = b'__room_closed__'
 """Encrypted control message sent by host to all peers when closing the room."""
 
+CTRL_NICK_PREFIX = b'__nick__:'
+"""
+Prefix for username-change notifications (encrypted).
+
+Full format: ``__nick__:<old_name>\\t<new_name>``
+
+Broadcast by a peer when they change their username with ``/nick``.
+"""
+
 CTRL_ACK_PREFIX = b'__ack__:'
 """
 Prefix for message delivery acknowledgement packets (encrypted).
