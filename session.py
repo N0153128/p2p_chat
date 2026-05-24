@@ -564,22 +564,12 @@ class UDPClient:
         import hmac as hmaclib
         import socket as socklib
 
-        tag = discovery._beacon_hmac(room_code, discovery.SESSION_ID)
-        # Embed room_code and room_name as base64 so joiners can discover and
-        # connect without knowing the code upfront.  has_passcode signals that
-        # a passcode prompt is required before the session is accepted.
-        # Embed only the raw token (no passcode suffix) so joiners can read it
-        # and reconstruct effective_room_code = raw_token + ':' + passcode.
-        room_code_b64 = base64.urlsafe_b64encode(self._raw_room_code.encode()).decode()
         room_name_b64 = base64.urlsafe_b64encode(self.room_name.encode()).decode() if self.room_name else ''
-        has_passcode_flag = '1' if self._passcode else '0'
-        my_beacon = BEACON_PREFIX + (
-            f'{discovery.SESSION_ID}:{chat_port}:{tag}'
-            f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}:{self._max_peers}'
-        ).encode()
+        room_code_b64 = base64.urlsafe_b64encode(self._raw_room_code.encode()).decode()
         # Maps peer session ID → last seen (ip, port).  Used to detect
         # reconnects where a peer reappears at a new address.
         seen_sids: dict[str, tuple] = {}
+        _last_passcode = object()  # sentinel — forces beacon rebuild on first iteration
 
         try:
             disc = socklib.socket(socklib.AF_INET, socklib.SOCK_DGRAM)
@@ -595,6 +585,19 @@ class UDPClient:
         try:
             while not self.done.is_set():
                 if self.is_host:
+                    # Rebuild beacon whenever passcode changes so new joiners
+                    # see the correct has_passcode flag and HMAC.
+                    nonlocal_passcode = self._passcode
+                    if nonlocal_passcode is not _last_passcode:
+                        _last_passcode = nonlocal_passcode
+                        effective_code = (self._raw_room_code + ':' + nonlocal_passcode
+                                          if nonlocal_passcode else self._raw_room_code)
+                        tag = discovery._beacon_hmac(effective_code, discovery.SESSION_ID)
+                        has_passcode_flag = '1' if nonlocal_passcode else '0'
+                        my_beacon = BEACON_PREFIX + (
+                            f'{discovery.SESSION_ID}:{chat_port}:{tag}'
+                            f':{room_code_b64}:{room_name_b64}:{has_passcode_flag}:{self._max_peers}'
+                        ).encode()
                     try:
                         disc.sendto(my_beacon, (broadcast, discovery.DISCOVERY_PORT))
                     except Exception:
@@ -981,7 +984,7 @@ class UDPClient:
         _ALL_COMMANDS = [
             '/exit', '/clear', '/nick', '/mute', '/unmute',
             '/motd', '/close', '/save_preset', '/dump_presets',
-            '/wipe_presets', '/help',
+            '/wipe_presets', '/who', '/passcode', '/help',
         ]
         _suggestion_rows = [0]  # mutable cell: how many overlay rows currently shown
 
@@ -1242,6 +1245,56 @@ class UDPClient:
                             ui._paint_panel()
                             sys.stdout.flush()
                     continue
+                if msg == '/who':
+                    with self._peers_lock:
+                        connected = [
+                            (p['username'] or '???', p['name_colour'], addr)
+                            for addr, p in self._peers.items()
+                            if p['connected'].is_set()
+                        ]
+                    lines = []
+                    # Self entry first.
+                    you = (self.name_colour + Style.BRIGHT
+                           + f'  {self.username}' + Style.RESET_ALL
+                           + Fore.WHITE + Style.DIM + '  (you)' + Style.RESET_ALL)
+                    lines.append(you)
+                    for name, nc, addr in connected:
+                        addr_str = f'***:{addr[1]}' if self.anonymous else f'{addr[0]}:{addr[1]}'
+                        lines.append(
+                            nc + Style.BRIGHT + f'  {name}' + Style.RESET_ALL
+                            + Fore.WHITE + Style.DIM + f'  {addr_str}' + Style.RESET_ALL
+                        )
+                    with print_lock:
+                        _, rows = ui._term_size()
+                        left_col, _ = ui._layout()
+                        sys.stdout.write(f'\x1b[{rows - 4};{left_col}H')
+                        sys.stdout.write(
+                            Fore.WHITE + Style.DIM + f'── {len(connected) + 1} in room ──\n' + Style.RESET_ALL
+                        )
+                        for line in lines:
+                            sys.stdout.write(f'\x1b[{left_col}G' + line + '\n')
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
+                if msg.startswith('/passcode') and self.is_host:
+                    new_pc = msg[len('/passcode'):].strip()
+                    if new_pc and not new_pc.isdigit():
+                        ui.print_msg('', 'Usage: /passcode <digits>  (or /passcode to remove)',
+                                     name_colour=Fore.YELLOW, text_colour=Fore.YELLOW)
+                        continue
+                    self._passcode = new_pc
+                    # _discover_loop detects the change on its next iteration and
+                    # rebuilds the beacon with the updated HMAC and has_passcode flag.
+                    notice = ('Passcode removed.' if not new_pc
+                              else 'Passcode changed. New joiners need the new code.')
+                    with print_lock:
+                        sys.stdout.write(f'\r{" " * 80}\r')
+                        sys.stdout.write(
+                            Fore.GREEN + Style.BRIGHT + notice + '\n' + Style.RESET_ALL
+                        )
+                        ui._paint_panel()
+                        sys.stdout.flush()
+                    continue
                 if msg == '/help':
                     _HELP = [
                         ('/exit',            'Leave the room'),
@@ -1251,19 +1304,24 @@ class UDPClient:
                         ('/unmute',          'Restore notification sounds'),
                         ('/motd <text>',     'Set message of the day  [host]'),
                         ('/close',           'Close the room           [host]'),
+                        ('/passcode <code>', 'Change passcode          [host]'),
                         ('/save_preset',     'Save room as a preset    [host]'),
                         ('/dump_presets',    'Export presets to a file'),
                         ('/wipe_presets',    'Delete all presets'),
+                        ('/who',             'List connected peers'),
                         ('/help',            'Show this list'),
                     ]
                     with print_lock:
-                        sys.stdout.write(f'\x1b[{ui._term_size()[1] - 4};1H')
+                        _, rows = ui._term_size()
+                        left_col, _ = ui._layout()
+                        sys.stdout.write(f'\x1b[{rows - 4};{left_col}H')
                         sys.stdout.write(
                             Fore.WHITE + Style.DIM + '─── commands ───\n' + Style.RESET_ALL
                         )
                         for cmd, desc in _HELP:
                             sys.stdout.write(
-                                Fore.CYAN + Style.BRIGHT + f'  {cmd:<20}' + Style.RESET_ALL
+                                f'\x1b[{left_col}G'
+                                + Fore.CYAN + Style.BRIGHT + f'  {cmd:<22}' + Style.RESET_ALL
                                 + Fore.WHITE + desc + '\n' + Style.RESET_ALL
                             )
                         ui._paint_panel()
