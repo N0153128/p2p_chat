@@ -427,9 +427,10 @@ def print_history(messages):
     header = (Fore.WHITE + Style.DIM
               + '─' * pad + label + '─' * (cols - pad - len(label))
               + Style.RESET_ALL)
-    # Write from row 1 of the scroll region so messages fill from the top and
-    # scroll up naturally rather than all piling at the bottom boundary.
-    sys.stdout.write('\x1b[1;1H')
+    # Clear the scroll region, then write history from the top so messages
+    # fill downward and scroll naturally.  Repaint the panel afterwards so
+    # the separator/input/status rows are intact.
+    sys.stdout.write('\x1b[1;1H\x1b[J')   # go to row 1, erase to bottom of scroll region
     sys.stdout.write(header + '\n')
     for m in messages:
         ts = Fore.WHITE + Style.DIM + m['ts'] + Style.RESET_ALL
@@ -439,6 +440,7 @@ def print_history(messages):
         body = tc + m['body'] + Style.RESET_ALL
         sys.stdout.write(f'{ts}  {sender}{body}\n')
     sys.stdout.write(dim_line + '\n')
+    _paint_panel()
     sys.stdout.flush()
 
 
