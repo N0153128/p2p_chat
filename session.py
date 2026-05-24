@@ -438,7 +438,10 @@ class UDPClient:
         if self.done.is_set():
             # Second Ctrl+C after already leaving the room — hard exit.
             sys.exit(0)
-        self._broadcast(CTRL_DISCONNECT)
+        if self.is_host:
+            self._broadcast(CTRL_ROOM_CLOSED)
+        else:
+            self._broadcast(CTRL_DISCONNECT)
         with print_lock:
             ui.disable_statusbar()
             self._panel_disabled = True
@@ -1128,7 +1131,10 @@ class UDPClient:
                 if self.done.is_set():
                     break
                 if msg == '/exit':
-                    self._broadcast(CTRL_DISCONNECT)
+                    if self.is_host:
+                        self._broadcast(CTRL_ROOM_CLOSED)
+                    else:
+                        self._broadcast(CTRL_DISCONNECT)
                     with print_lock:
                         sys.stdout.write(f'\r{" " * 80}\r')
                         sys.stdout.write(
@@ -1302,4 +1308,5 @@ class UDPClient:
                     self._log(f'(you) <{self.username}>', f': {msg}',
                               name_colour=self.name_colour, text_colour=self.text_colour)
         except (KeyboardInterrupt, EOFError):
-            pass
+            if self.is_host and not self.done.is_set():
+                self._broadcast(CTRL_ROOM_CLOSED)
