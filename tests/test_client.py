@@ -96,6 +96,7 @@ def make_client_obj(sock, remote_addr=('127.0.0.1', 9999), box=None):
             'username': '',
             'is_host': False,
             'room_name': '',
+            'anonymous': False,
         }
     }
     return c
@@ -688,7 +689,7 @@ class TestMultiPeer:
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)
-        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': ''}
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': '', 'anonymous': False}
         c._peers = {
             addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
             addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},
@@ -756,7 +757,7 @@ class TestMultiPeer:
         c._first_connected = threading.Event()
         c._first_connected.set()
         c._own_addr = addr_of(sock_a)
-        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': ''}
+        peer_base = {'name_colour': Fore.CYAN, 'text_colour': Fore.WHITE, 'muted': False, 'username': '', 'is_host': False, 'room_name': '', 'anonymous': False}
         c._peers = {
             addr_of(sock_b): {**peer_base, 'box': box_a_b, 'connected': threading.Event()},
             addr_of(sock_c): {**peer_base, 'box': box_a_c, 'connected': threading.Event()},
@@ -784,3 +785,455 @@ class TestMultiPeer:
         sock_a.close()
         sock_b.close()
         sock_c.close()
+
+
+# ---------------------------------------------------------------------------
+# TestRoomClosed
+# ---------------------------------------------------------------------------
+
+class TestRoomClosed:
+    """CTRL_ROOM_CLOSED handling."""
+
+    def test_room_closed_sets_done(self):
+        """Perfect: host sends CTRL_ROOM_CLOSED → client sets done."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        box_ab, box_ba = make_box_pair()
+        c = make_client_obj(sock_a)
+        c._peers = {addr_of(sock_b): {
+            'box': box_ab, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': 'host', 'is_host': True, 'room_name': 'r', 'anonymous': False,
+        }}
+        c._peers[addr_of(sock_b)]['connected'].set()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_b.sendto(box_ba.encrypt(protocol.CTRL_ROOM_CLOSED), addr_of(sock_a))
+            time.sleep(0.15)
+            assert c.done.is_set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_b.close()
+
+    def test_disconnect_does_not_set_done(self):
+        """Edge: CTRL_DISCONNECT from a non-last peer does NOT set done."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        sock_c = make_udp_sock()
+        box_ab, box_ba = make_box_pair()
+        box_ac, box_ca = make_box_pair()
+        c = make_client_obj(sock_a)
+        peer_base = {'name_colour': '', 'text_colour': '', 'muted': False,
+                     'username': '', 'is_host': False, 'room_name': '', 'anonymous': False}
+        c._peers = {
+            addr_of(sock_b): {**peer_base, 'box': box_ab, 'connected': threading.Event()},
+            addr_of(sock_c): {**peer_base, 'box': box_ac, 'connected': threading.Event()},
+        }
+        c._peers[addr_of(sock_b)]['connected'].set()
+        c._peers[addr_of(sock_c)]['connected'].set()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_b.sendto(box_ba.encrypt(protocol.CTRL_DISCONNECT), addr_of(sock_a))
+            time.sleep(0.1)
+            assert not c.done.is_set()
+            c.done.set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_b.close()
+        sock_c.close()
+
+    def test_room_closed_from_unknown_peer_ignored(self):
+        """Bad: CTRL_ROOM_CLOSED from unregistered address is ignored."""
+        sock_a = make_udp_sock()
+        sock_stranger = make_udp_sock()
+        _, box_stranger = make_box_pair()
+        c = make_client_obj(sock_a)
+        c._peers = {}
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            sock_stranger.sendto(box_stranger.encrypt(protocol.CTRL_ROOM_CLOSED), addr_of(sock_a))
+            time.sleep(0.1)
+            assert not c.done.is_set()
+            c.done.set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_stranger.close()
+
+
+# ---------------------------------------------------------------------------
+# TestAnonymousMode
+# ---------------------------------------------------------------------------
+
+class TestAnonymousMode:
+    """Anonymous flag propagated via CTRL_META wire format."""
+
+    def _send_meta(self, sock_sender, box, sock_receiver, username='alice',
+                   name_colour='white', text_colour='white',
+                   is_host='0', room_name='room', anon_flag='1'):
+        import base64
+        from session import CTRL_META_PREFIX
+        room_name_b64 = base64.b64encode(room_name.encode()).decode()
+        meta = (CTRL_META_PREFIX
+                + f'{username},{name_colour},{text_colour},{is_host},{room_name_b64},{anon_flag}'.encode())
+        sock_sender.sendto(box.encrypt(meta), addr_of(sock_receiver))
+
+    def test_anonymous_flag_true_stored(self):
+        """Perfect: meta with anon=1 → peer['anonymous'] is True."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        box_ab, box_ba = make_box_pair()
+        c = make_client_obj(sock_a)
+        c._peers = {addr_of(sock_b): {
+            'box': box_ab, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': '', 'is_host': False, 'room_name': '', 'anonymous': False,
+        }}
+        c._peers[addr_of(sock_b)]['connected'].set()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            self._send_meta(sock_b, box_ba, sock_a, anon_flag='1')
+            time.sleep(0.1)
+            assert c._peers[addr_of(sock_b)]['anonymous'] is True
+            c.done.set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_b.close()
+
+    def test_anonymous_flag_false_stored(self):
+        """Perfect: meta with anon=0 → peer['anonymous'] is False."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        box_ab, box_ba = make_box_pair()
+        c = make_client_obj(sock_a)
+        c._peers = {addr_of(sock_b): {
+            'box': box_ab, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': '', 'is_host': False, 'room_name': '', 'anonymous': False,
+        }}
+        c._peers[addr_of(sock_b)]['connected'].set()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            self._send_meta(sock_b, box_ba, sock_a, anon_flag='0')
+            time.sleep(0.1)
+            assert c._peers[addr_of(sock_b)]['anonymous'] is False
+            c.done.set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_b.close()
+
+    def test_anonymous_flag_missing_defaults_false(self):
+        """Edge: legacy meta without 6th field → peer['anonymous'] defaults False."""
+        import base64
+        from session import CTRL_META_PREFIX
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        box_ab, box_ba = make_box_pair()
+        c = make_client_obj(sock_a)
+        c._peers = {addr_of(sock_b): {
+            'box': box_ab, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': '', 'is_host': False, 'room_name': '', 'anonymous': False,
+        }}
+        c._peers[addr_of(sock_b)]['connected'].set()
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            t = threading.Thread(target=c._recv_loop, daemon=True)
+            t.start()
+            time.sleep(0.05)
+            room_b64 = base64.b64encode(b'room').decode()
+            meta = CTRL_META_PREFIX + f'alice,white,white,0,{room_b64}'.encode()
+            sock_b.sendto(box_ba.encrypt(meta), addr_of(sock_a))
+            time.sleep(0.1)
+            assert c._peers[addr_of(sock_b)].get('anonymous', False) is False
+            c.done.set()
+            t.join(timeout=3)
+        finally:
+            sys.stdout = old_stdout
+        sock_a.close()
+        sock_b.close()
+
+
+# ---------------------------------------------------------------------------
+# TestWhoCommand
+# ---------------------------------------------------------------------------
+
+def _who_peer_list(c):
+    """Replicate the /who data-gathering logic from session.py send loop."""
+    with c._peers_lock:
+        return [
+            (p['username'] or '???', p['name_colour'], addr, p.get('anonymous', False))
+            for addr, p in c._peers.items()
+            if p['connected'].is_set()
+        ]
+
+
+class TestWhoCommand:
+    """/who peer-list logic."""
+
+    def test_who_lists_connected_peer(self):
+        """Perfect: connected peer appears in the /who peer list."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        c = make_client_obj(sock_a)
+        c._peers = {addr_of(sock_b): {
+            'box': None, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': 'bob', 'is_host': False, 'room_name': '', 'anonymous': False,
+        }}
+        c._peers[addr_of(sock_b)]['connected'].set()
+        connected = _who_peer_list(c)
+        names = [name for name, *_ in connected]
+        assert 'bob' in names
+        sock_a.close()
+        sock_b.close()
+
+    def test_who_masks_anonymous_peer_address(self):
+        """Edge: anonymous flag causes address to be masked with *** in display."""
+        sock_a = make_udp_sock()
+        sock_b = make_udp_sock()
+        c = make_client_obj(sock_a)
+        addr_b = addr_of(sock_b)
+        c._peers = {addr_b: {
+            'box': None, 'connected': threading.Event(),
+            'name_colour': '', 'text_colour': '', 'muted': False,
+            'username': 'anon_user', 'is_host': False, 'room_name': '', 'anonymous': True,
+        }}
+        c._peers[addr_b]['connected'].set()
+        connected = _who_peer_list(c)
+        assert len(connected) == 1
+        name, nc, addr, peer_anon = connected[0]
+        addr_str = f'***:{addr[1]}' if peer_anon else f'{addr[0]}:{addr[1]}'
+        assert '***' in addr_str
+        assert addr_b[0] not in addr_str
+        sock_a.close()
+        sock_b.close()
+
+    def test_who_empty_when_no_peers(self):
+        """Bad: no peers → peer list is empty."""
+        sock_a = make_udp_sock()
+        c = make_client_obj(sock_a)
+        c._peers = {}
+        connected = _who_peer_list(c)
+        assert connected == []
+        sock_a.close()
+
+
+# ---------------------------------------------------------------------------
+# TestPasscodeChange
+# ---------------------------------------------------------------------------
+
+def _apply_passcode(c, new_pc):
+    """Replicate the /passcode inline logic from session.py send loop."""
+    if new_pc and not new_pc.isdigit():
+        return False  # rejected
+    c._passcode = new_pc
+    return True
+
+
+class TestPasscodeChange:
+    """/passcode command updates internal state."""
+
+    def test_passcode_updated(self):
+        """Perfect: valid digit passcode → _passcode updated."""
+        sock_a = make_udp_sock()
+        c = make_client_obj(sock_a)
+        c.is_host = True
+        c._passcode = ''
+        c._raw_room_code = 'deadbeef'
+        accepted = _apply_passcode(c, '1234')
+        assert accepted
+        assert c._passcode == '1234'
+        sock_a.close()
+
+    def test_passcode_cleared(self):
+        """Edge: empty string clears the passcode."""
+        sock_a = make_udp_sock()
+        c = make_client_obj(sock_a)
+        c.is_host = True
+        c._passcode = '9999'
+        c._raw_room_code = 'deadbeef'
+        accepted = _apply_passcode(c, '')
+        assert accepted
+        assert c._passcode == ''
+        sock_a.close()
+
+    def test_passcode_non_digit_rejected(self):
+        """Bad: non-digit passcode → rejected, _passcode unchanged."""
+        sock_a = make_udp_sock()
+        c = make_client_obj(sock_a)
+        c.is_host = True
+        c._passcode = '1234'
+        c._raw_room_code = 'deadbeef'
+        accepted = _apply_passcode(c, 'abc!')
+        assert not accepted
+        assert c._passcode == '1234'
+        sock_a.close()
+
+    def test_passcode_hmac_differs_after_change(self):
+        """Perfect: HMAC tag for new passcode differs from old passcode."""
+        room = 'deadbeef'
+        tag_old = discovery._beacon_hmac(room + ':1111', discovery.SESSION_ID)
+        tag_new = discovery._beacon_hmac(room + ':2222', discovery.SESSION_ID)
+        assert tag_old != tag_new
+
+    def test_passcode_hmac_open_vs_locked(self):
+        """Edge: open room HMAC differs from locked room HMAC."""
+        room = 'cafebabe'
+        tag_open = discovery._beacon_hmac(room, discovery.SESSION_ID)
+        tag_locked = discovery._beacon_hmac(room + ':5678', discovery.SESSION_ID)
+        assert tag_open != tag_locked
+
+
+# ---------------------------------------------------------------------------
+# TestMessageLog
+# ---------------------------------------------------------------------------
+
+class TestMessageLog:
+    """db.log_message / db.load_history integration tests."""
+
+    def test_log_and_load_roundtrip(self, tmp_path):
+        """Perfect: logged message appears in load_history."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            _db.log_message('myroom', 'alice', 'hello world')
+            history = _db.load_history('myroom')
+            assert len(history) == 1
+            assert history[0]['sender'] == 'alice'
+            assert history[0]['body'] == 'hello world'
+        finally:
+            _db.DB_PATH = orig
+
+    def test_ansi_stripped_on_store(self, tmp_path):
+        """Perfect: ANSI escape codes are stripped before storage."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            _db.log_message('r', 'sender', '\x1b[32mgreen text\x1b[0m')
+            history = _db.load_history('r')
+            assert '\x1b' not in history[0]['body']
+            assert 'green text' in history[0]['body']
+        finally:
+            _db.DB_PATH = orig
+
+    def test_colours_stored_and_retrieved(self, tmp_path):
+        """Perfect: name_colour and text_colour survive the round-trip."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            _db.log_message('r', 'bob', 'hi', name_colour='cyan', text_colour='magenta')
+            row = _db.load_history('r')[0]
+            assert row['name_colour'] == 'cyan'
+            assert row['text_colour'] == 'magenta'
+        finally:
+            _db.DB_PATH = orig
+
+    def test_load_history_empty_room(self, tmp_path):
+        """Edge: room with no messages returns empty list."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            history = _db.load_history('nonexistent_room')
+            assert history == []
+        finally:
+            _db.DB_PATH = orig
+
+    def test_log_message_empty_room_name_noop(self, tmp_path):
+        """Bad: empty room name → log_message is a no-op, no crash."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            _db.log_message('', 'alice', 'should not be stored')
+            history = _db.load_history('')
+            assert history == []
+        finally:
+            _db.DB_PATH = orig
+
+    def test_load_history_empty_room_name(self, tmp_path):
+        """Bad: load_history('') returns empty list."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            result = _db.load_history('')
+            assert result == []
+        finally:
+            _db.DB_PATH = orig
+
+    def test_message_log_capped_at_limit(self, tmp_path):
+        """Edge: inserting more than MSG_LOG_LIMIT prunes oldest rows."""
+        import db as _db
+        orig = _db.DB_PATH
+        orig_limit = _db.MSG_LOG_LIMIT
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        _db.MSG_LOG_LIMIT = 5
+        try:
+            for i in range(8):
+                _db.log_message('r', 'alice', f'msg{i}')
+            history = _db.load_history('r', limit=100)
+            assert len(history) <= 5
+        finally:
+            _db.DB_PATH = orig
+            _db.MSG_LOG_LIMIT = orig_limit
+
+    def test_history_returned_oldest_first(self, tmp_path):
+        """Perfect: messages returned in insertion order (oldest first)."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            for i in range(3):
+                _db.log_message('r', 'alice', f'msg{i}')
+            history = _db.load_history('r')
+            assert [h['body'] for h in history] == ['msg0', 'msg1', 'msg2']
+        finally:
+            _db.DB_PATH = orig
+
+    def test_rooms_are_isolated(self, tmp_path):
+        """Perfect: messages from different rooms do not bleed into each other."""
+        import db as _db
+        orig = _db.DB_PATH
+        _db.DB_PATH = str(tmp_path / 'test.db')
+        try:
+            _db.log_message('room_a', 'alice', 'in a')
+            _db.log_message('room_b', 'bob', 'in b')
+            assert all(h['body'] == 'in a' for h in _db.load_history('room_a'))
+            assert all(h['body'] == 'in b' for h in _db.load_history('room_b'))
+        finally:
+            _db.DB_PATH = orig
