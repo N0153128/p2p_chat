@@ -118,8 +118,12 @@ def _pick_preset():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('-a', '--anonymous', action='store_true')
+    parser.add_argument('-c', '--center', action='store_true')
     args, _ = parser.parse_known_args()
     anonymous = args.anonymous
+
+    import ui as _ui
+    _ui.centered = args.center
 
     show_greeting()
 

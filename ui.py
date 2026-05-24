@@ -6,6 +6,7 @@ message printing, and the interactive colour picker shown at startup.
 import math
 import os
 import random
+import re
 import shutil
 import struct
 import subprocess
@@ -15,6 +16,31 @@ import threading
 
 import pyfiglet
 from colorama import Fore, Style
+
+# When True, chat messages and the input prompt are horizontally centred.
+# Set once at startup via ui.centered = True before launching a session.
+centered = False
+
+_ANSI_RE = re.compile(r'\x1b\[[0-9;]*[mKHJrABCDsu]|\x1b[78]')
+
+
+def _visible_len(s):
+    """Return the printable character count of *s* (ANSI codes excluded)."""
+    return len(_ANSI_RE.sub('', s))
+
+
+def _center_pad(s):
+    """Return a left-padding string so *s* is centred in the terminal.
+
+    Only adds padding when ``ui.centered`` is True.  The padding is a plain
+    space string — callers prepend it before their coloured text.
+    """
+    if not centered:
+        return ''
+    cols, _ = _term_size()
+    vlen = _visible_len(s)
+    pad = max(0, (cols - vlen) // 2)
+    return ' ' * pad
 
 
 # ---------------------------------------------------------------------------
@@ -351,7 +377,8 @@ def _paint_panel(restore_cursor=True):
         sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE + sep)
         # rows-2: input row
         sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE)
-        sys.stdout.write(get_prompt())
+        prompt = get_prompt()
+        sys.stdout.write(_center_pad(prompt) + prompt)
         # rows-1: separator above status bar
         sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE + sep)
         # rows: status bar
@@ -441,7 +468,8 @@ def print_history(messages):
         tc = colour_for(m.get('text_colour', 'white'))
         sender = Style.BRIGHT + nc + m['sender'] + Style.RESET_ALL
         body = tc + m['body'] + Style.RESET_ALL
-        lines.append(f'{ts}  {sender}{body}')
+        content = f'{ts}  {sender}{body}'
+        lines.append(_center_pad(content) + content)
     lines.append(dim_line)
 
     # Only keep as many lines as fit in the scroll region (older ones scroll off).
@@ -481,10 +509,9 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
         _, rows = _term_size()
         sys.stdout.write(f'\x1b[{rows - 4};1H')
         sys.stdout.write(f'\r{" " * 80}\r')
-        sys.stdout.write(
-            Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
-            + text_colour + text_part + Style.RESET_ALL + '\n'
-        )
+        content = (Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
+                   + text_colour + text_part + Style.RESET_ALL)
+        sys.stdout.write(_center_pad(content) + content + '\n')
         _paint_panel()
         sys.stdout.flush()
 
@@ -526,8 +553,11 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL
         )
+        pad = _center_pad(line + ' ⧖')
         pending = Fore.WHITE + Style.DIM + ' ⧖' + Style.RESET_ALL
-        sys.stdout.write(line + pending + '\n')
+        sys.stdout.write(pad + line + pending + '\n')
+        # Adjust indicator column to account for centering offset.
+        indicator_col = max(len(pad) + _visible_len(line) + 1, 1)
         _paint_panel()
         sys.stdout.flush()
 
