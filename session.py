@@ -963,7 +963,7 @@ class UDPClient:
         """
         prompt = self._prompt()
         buf_text = self.text_colour + ''.join(buf) + Style.RESET_ALL if buf else ''
-        sys.stdout.write(ui._center_pad(prompt + ''.join(buf)) + prompt + buf_text)
+        sys.stdout.write(prompt + buf_text)
 
     def _readline_styled(self):
         """Read one line from stdin in raw mode, echoing each character in

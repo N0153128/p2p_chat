@@ -29,39 +29,51 @@ def _visible_len(s):
     return len(_ANSI_RE.sub('', s))
 
 
-_CENTER_BIAS = 8
-"""Columns to shift centre-aligned output leftward from true centre."""
+def _layout():
+    """Return ``(left_col, content_width)`` for the current terminal.
+
+    In centered mode the content occupies the middle 80% of the terminal
+    (10% margins on each side).  In normal mode left_col=1 and
+    content_width=cols so everything spans the full width as before.
+
+    ``left_col`` is 1-based (matches ANSI cursor column addressing).
+    """
+    cols, _ = _term_size()
+    if not centered:
+        return 1, cols
+    margin = max(1, cols // 10)
+    return margin + 1, cols - 2 * margin
+
+
+def _left_pad():
+    """Return the left-margin padding string (empty when not centered)."""
+    left_col, _ = _layout()
+    return ' ' * (left_col - 1)
 
 
 def _center_pad(s):
-    """Return a left-padding string so *s* is near-centred in the terminal.
+    """Return left-margin padding regardless of *s* content.
 
-    Only adds padding when ``ui.centered`` is True.  The result is shifted
-    slightly left of true centre (by _CENTER_BIAS columns) so it feels more
-    natural on wide terminals.
+    Kept for call-site compatibility; in the new layout model all lines
+    share the same left margin — per-string width measurement is no longer
+    needed for chat output.
     """
-    if not centered:
-        return ''
-    cols, _ = _term_size()
-    vlen = _visible_len(s)
-    pad = max(0, (cols - vlen) // 2 - _CENTER_BIAS)
-    return ' ' * pad
+    return _left_pad()
 
 
 def cprint(text='', end='\n'):
-    """Print *text* centred (or normally when centered=False).
+    """Print *text* with the left margin applied (or flush-left when not centered).
 
-    Accepts plain strings or ANSI-coloured strings; measures visible width
-    correctly.  Use in place of ``print()`` / ``sys.stdout.write()`` for
-    all pre-session output lines.
+    Use in place of ``print()`` / ``sys.stdout.write()`` for all pre-session
+    output lines so they respect centered mode automatically.
     """
-    sys.stdout.write(_center_pad(text) + text + end)
+    sys.stdout.write(_left_pad() + text + end)
     sys.stdout.flush()
 
 
 def cinput(prompt):
-    """Like ``input()`` but the prompt is centred when centered=True."""
-    return input(_center_pad(prompt) + prompt)
+    """Like ``input()`` but indented by the left margin when centered=True."""
+    return input(_left_pad() + prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -376,34 +388,44 @@ def _paint_panel(restore_cursor=True):
     Must be called while print_lock is held.
     """
     cols, rows = _term_size()
+    left_col, content_width = _layout()
     bar = get_statusbar()
-    sep = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
+    # Separators span only the content area in centered mode.
+    sep = Fore.WHITE + Style.DIM + '─' * content_width + Style.RESET_ALL
 
     if get_input_redraw is not None:
         # rows-3: separator above input
-        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE + sep)
+        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 3};{left_col}H' + sep)
         # rows-2: input row — write prompt + buffer, save cursor after typed text
-        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE)
+        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 2};{left_col}H')
         get_input_redraw()          # cursor now after typed text in rows-2
         sys.stdout.write(_SAVE_CUR)
         # rows-1: separator above status bar
-        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE + sep)
+        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 1};{left_col}H' + sep)
         # rows: status bar
-        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE + (bar or ''))
+        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE
+                         + f'\x1b[{rows};{left_col}H' + (bar or ''))
         sys.stdout.write(_REST_CUR)
     else:
         # No active readline: save pre-paint cursor, paint all, optionally restore.
         sys.stdout.write(_SAVE_CUR)
         # rows-3: separator above input
-        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE + sep)
+        sys.stdout.write(f'\x1b[{rows - 3};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 3};{left_col}H' + sep)
         # rows-2: input row
-        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE)
+        sys.stdout.write(f'\x1b[{rows - 2};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 2};{left_col}H')
         prompt = get_prompt()
-        sys.stdout.write(_center_pad(prompt) + prompt)
+        sys.stdout.write(prompt)
         # rows-1: separator above status bar
-        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE + sep)
+        sys.stdout.write(f'\x1b[{rows - 1};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 1};{left_col}H' + sep)
         # rows: status bar
-        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE + (bar or ''))
+        sys.stdout.write(f'\x1b[{rows};1H' + _ERASE_LINE
+                         + f'\x1b[{rows};{left_col}H' + (bar or ''))
         if restore_cursor:
             sys.stdout.write(_REST_CUR)
 
@@ -414,9 +436,11 @@ def _write_statusbar():
     if not bar:
         return
     _, rows = _term_size()
+    left_col, _ = _layout()
     sys.stdout.write(
         _SAVE_CUR
-        + f'\x1b[{rows};1H' + _ERASE_LINE + bar
+        + f'\x1b[{rows};1H' + _ERASE_LINE
+        + f'\x1b[{rows};{left_col}H' + bar
         + _REST_CUR
     )
 
@@ -427,9 +451,10 @@ def enable_statusbar():
     Call once when a session starts, while print_lock is held.
     """
     _, rows = _term_size()
+    left_col, _ = _layout()
     _set_scroll_region(rows)
     # Move cursor into the scroll region so it doesn't sit on the panel.
-    sys.stdout.write(f'\x1b[{rows - 4};1H')
+    sys.stdout.write(f'\x1b[{rows - 4};{left_col}H')
     _paint_panel()
 
 
@@ -469,17 +494,15 @@ def print_history(messages):
     if not messages:
         return
     cols, rows = _term_size()
-    dim_line = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
-    label = ' chat history '
-    pad = (cols - len(label)) // 2
-    header = (Fore.WHITE + Style.DIM
-              + '─' * pad + label + '─' * (cols - pad - len(label))
-              + Style.RESET_ALL)
-    # Clear the scroll region, then write history from the top so messages
-    # fill downward and scroll naturally.  Repaint the panel afterwards so
-    # the separator/input/status rows are intact.
-    cols, rows = _term_size()
+    left_col, content_width = _layout()
     scroll_rows = rows - 4  # height of the scroll region (rows 1..rows-4)
+
+    dim_line = Fore.WHITE + Style.DIM + '─' * content_width + Style.RESET_ALL
+    label = ' chat history '
+    side = max(0, (content_width - len(label)) // 2)
+    header = (Fore.WHITE + Style.DIM
+              + '─' * side + label + '─' * (content_width - side - len(label))
+              + Style.RESET_ALL)
 
     # Build all lines first so we know how many there are.
     lines = [header]
@@ -489,8 +512,7 @@ def print_history(messages):
         tc = colour_for(m.get('text_colour', 'white'))
         sender = Style.BRIGHT + nc + m['sender'] + Style.RESET_ALL
         body = tc + m['body'] + Style.RESET_ALL
-        content = f'{ts}  {sender}{body}'
-        lines.append(_center_pad(content) + content)
+        lines.append(f'{ts}  {sender}{body}')
     lines.append(dim_line)
 
     # Only keep as many lines as fit in the scroll region (older ones scroll off).
@@ -500,9 +522,9 @@ def print_history(messages):
     # leaving no gap between history and live chat.
     start_row = max(1, scroll_rows - len(visible) + 1)
     sys.stdout.write('\x1b[1;1H\x1b[J')  # clear the scroll region
-    sys.stdout.write(f'\x1b[{start_row};1H')
-    for line in visible:
-        sys.stdout.write(line + '\r\n')
+    for i, line in enumerate(visible):
+        row = start_row + i
+        sys.stdout.write(f'\x1b[{row};{left_col}H' + line)
     _paint_panel()
     sys.stdout.flush()
 
@@ -528,11 +550,12 @@ def print_msg(username_part, text_part, name_colour=Fore.CYAN, text_colour=Fore.
         # Move to the last row of the scroll region so the message scrolls up
         # into chat history regardless of where the cursor currently is.
         _, rows = _term_size()
-        sys.stdout.write(f'\x1b[{rows - 4};1H')
-        sys.stdout.write(f'\r{" " * 80}\r')
+        left_col, _ = _layout()
+        sys.stdout.write(f'\x1b[{rows - 4};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 4};{left_col}H')
         content = (Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
                    + text_colour + text_part + Style.RESET_ALL)
-        sys.stdout.write(_center_pad(content) + content + '\n')
+        sys.stdout.write(content + '\n')
         _paint_panel()
         sys.stdout.flush()
 
@@ -561,24 +584,23 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
         ``update(status)`` callable.
     """
     cols, rows = _term_size()
+    left_col, content_width = _layout()
     # The message is written at the bottom of the scroll region (rows-4).
     # After the \n the terminal scrolls, so the message ends up at rows-5.
     msg_row = rows - 5
-    indicator_col = max(cols - 3, 1)
+    # Indicator sits near the right edge of the content area.
+    indicator_col = left_col + content_width - 3
     _fired = threading.Event()
 
     with print_lock:
-        sys.stdout.write(f'\x1b[{rows - 4};1H')
-        sys.stdout.write(f'\r{" " * 80}\r')
+        sys.stdout.write(f'\x1b[{rows - 4};1H' + _ERASE_LINE
+                         + f'\x1b[{rows - 4};{left_col}H')
         line = (
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL
         )
-        pad = _center_pad(line + ' ⧖')
         pending = Fore.WHITE + Style.DIM + ' ⧖' + Style.RESET_ALL
-        sys.stdout.write(pad + line + pending + '\n')
-        # Adjust indicator column to account for centering offset.
-        indicator_col = max(len(pad) + _visible_len(line) + 1, 1)
+        sys.stdout.write(line + pending + '\n')
         _paint_panel()
         sys.stdout.flush()
 
