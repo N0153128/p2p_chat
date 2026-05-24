@@ -243,9 +243,6 @@ class UDPClient:
             signal.signal(signal.SIGINT, self._prev_sigint)
             return
 
-        send_thread = threading.Thread(target=self._send_loop, daemon=True)
-        send_thread.start()
-
         ui.get_prompt = self._prompt
         ui.get_statusbar = self._statusbar
         with print_lock:
@@ -256,6 +253,11 @@ class UDPClient:
                     ui.print_history(history)
             sys.stdout.flush()
         self._panel_disabled = False
+
+        # Start send thread AFTER history is printed so tty.setraw doesn't
+        # race with print_history (raw mode turns \n into just LF, not CR+LF).
+        send_thread = threading.Thread(target=self._send_loop, daemon=True)
+        send_thread.start()
         self.done.wait()
         with print_lock:
             if not self._panel_disabled:

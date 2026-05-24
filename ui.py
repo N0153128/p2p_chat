@@ -431,15 +431,15 @@ def print_history(messages):
     # fill downward and scroll naturally.  Repaint the panel afterwards so
     # the separator/input/status rows are intact.
     sys.stdout.write('\x1b[1;1H\x1b[J')   # go to row 1, erase to bottom of scroll region
-    sys.stdout.write(header + '\n')
+    sys.stdout.write(header + '\r\n')
     for m in messages:
         ts = Fore.WHITE + Style.DIM + m['ts'] + Style.RESET_ALL
         nc = colour_for(m.get('name_colour', 'white'))
         tc = colour_for(m.get('text_colour', 'white'))
         sender = Style.BRIGHT + nc + m['sender'] + Style.RESET_ALL
         body = tc + m['body'] + Style.RESET_ALL
-        sys.stdout.write(f'{ts}  {sender}{body}\n')
-    sys.stdout.write(dim_line + '\n')
+        sys.stdout.write(f'{ts}  {sender}{body}\r\n')
+    sys.stdout.write(dim_line + '\r\n')
     _paint_panel()
     sys.stdout.flush()
 
