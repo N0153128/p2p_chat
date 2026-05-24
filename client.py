@@ -30,7 +30,7 @@ import db
 import discovery
 import stun
 from session import UDPClient
-from ui import pick_colour, show_greeting
+from ui import cinput, cprint, pick_colour, show_greeting
 
 
 def _get_local_ip():
@@ -51,32 +51,28 @@ def _get_local_ip():
 
 def _prompt_with_default(prompt, default):
     """Show *prompt*, return *default* if the user presses Enter without input."""
-    raw = input(f'{prompt} [{default}]: ').strip()
+    raw = cinput(f'{prompt} [{default}]: ').strip()
     return raw if raw else default
 
 
 def _field(emoji, label, hint=''):
-    """Print a styled field label and return the input prompt string."""
+    """Print a styled field label and return the centred input prompt string."""
     hint_str = Fore.WHITE + Style.DIM + f'  {hint}' + Style.RESET_ALL if hint else ''
-    sys.stdout.write(
-        Fore.CYAN + Style.BRIGHT + f'  {emoji}  ' + Style.RESET_ALL
-        + Fore.WHITE + Style.BRIGHT + label + Style.RESET_ALL
-        + hint_str + '\n'
-    )
-    sys.stdout.flush()
-    return Fore.CYAN + '     › ' + Style.RESET_ALL
+    content = (Fore.CYAN + Style.BRIGHT + f'  {emoji}  ' + Style.RESET_ALL
+               + Fore.WHITE + Style.BRIGHT + label + Style.RESET_ALL
+               + hint_str)
+    cprint(content)
+    prompt = Fore.CYAN + '  › ' + Style.RESET_ALL
+    return prompt
 
 
 def _section(title):
     """Print a coloured section divider."""
     cols = __import__('shutil').get_terminal_size(fallback=(80, 24)).columns
     line = Fore.WHITE + Style.DIM + '─' * cols + Style.RESET_ALL
-    sys.stdout.write(
-        line + '\n'
-        + Fore.YELLOW + Style.BRIGHT + f'  {title}\n' + Style.RESET_ALL
-        + line + '\n'
-    )
-    sys.stdout.flush()
+    cprint(line, end='')
+    cprint(Fore.YELLOW + Style.BRIGHT + f'  {title}' + Style.RESET_ALL)
+    cprint(line, end='\n')
 
 
 def _pick_preset():
@@ -87,32 +83,30 @@ def _pick_preset():
     """
     presets = db.load_room_presets()
     if not presets:
-        sys.stdout.write(Fore.YELLOW + Style.BRIGHT + '  ⊘  No saved presets.\n' + Style.RESET_ALL)
-        sys.stdout.flush()
+        cprint(Fore.YELLOW + Style.BRIGHT + '  ⊘  No saved presets.' + Style.RESET_ALL)
         return None
 
     _section('📋  Room Presets')
     for i, p in enumerate(presets, 1):
         lock_icon = ' 🔒' if p['passcode'] else ''
         host_icon = ' 👑' if p['is_host'] else ''
-        sys.stdout.write(
+        cprint(
             Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
             + Fore.WHITE + f'  {p["name"]}{lock_icon}{host_icon}'
-            + Fore.WHITE + Style.DIM + f'  [{p["slots"]} slots]\n' + Style.RESET_ALL
+            + Fore.WHITE + Style.DIM + f'  [{p["slots"]} slots]' + Style.RESET_ALL
         )
-    sys.stdout.flush()
 
     while True:
-        raw = input(f'  Choose preset (1–{len(presets)}) or 0 to cancel: ').strip()
+        raw = cinput(f'  Choose preset (1–{len(presets)}) or 0 to cancel: ').strip()
         if not raw.isdigit():
-            print('  Enter a number.')
+            cprint('  Enter a number.')
             continue
         choice = int(raw)
         if choice == 0:
             return None
         if 1 <= choice <= len(presets):
             return presets[choice - 1]
-        print(f'  Enter a number between 0 and {len(presets)}.')
+        cprint(f'  Enter a number between 0 and {len(presets)}.')
 
 
 if __name__ == '__main__':
@@ -131,7 +125,7 @@ if __name__ == '__main__':
 
     # --- username ---
     username = _prompt_with_default('Your name', prefs['username'] or 'anonymous')
-    print()
+    cprint()
 
     # --- colours ---
     name_colour_name, name_colour = pick_colour(
@@ -159,67 +153,48 @@ if __name__ == '__main__':
     ext_ip, _ = stun.get_external_address(sock)
 
     display_ip = '***.***.***.***' if anonymous else (ext_ip or 'unavailable')
-    sys.stdout.write(
-        Fore.CYAN + Style.BRIGHT + '  public IP  ' + Style.RESET_ALL
-        + Fore.WHITE + Style.BRIGHT + display_ip + Style.RESET_ALL + '\n'
-    )
-    sys.stdout.write(
-        Fore.CYAN + Style.BRIGHT + '  chat port  ' + Style.RESET_ALL
-        + Fore.WHITE + Style.BRIGHT + str(chat_port) + Style.RESET_ALL + '\n'
-    )
-    sys.stdout.write('\n')
-    sys.stdout.write(
-        Fore.MAGENTA + Style.BRIGHT + '  l' + Style.RESET_ALL
-        + Fore.WHITE + '  —  find a peer on this network automatically\n' + Style.RESET_ALL
-    )
-    sys.stdout.write(
-        Fore.MAGENTA + Style.BRIGHT + '  g' + Style.RESET_ALL
-        + Fore.WHITE + '  —  connect to a peer on the internet\n' + Style.RESET_ALL
-    )
-    sys.stdout.write('\n')
-    sys.stdout.flush()
+    cprint(Fore.CYAN + Style.BRIGHT + '  public IP  ' + Style.RESET_ALL
+           + Fore.WHITE + Style.BRIGHT + display_ip + Style.RESET_ALL)
+    cprint(Fore.CYAN + Style.BRIGHT + '  chat port  ' + Style.RESET_ALL
+           + Fore.WHITE + Style.BRIGHT + str(chat_port) + Style.RESET_ALL)
+    cprint()
+    cprint(Fore.MAGENTA + Style.BRIGHT + '  l' + Style.RESET_ALL
+           + Fore.WHITE + '  —  find a peer on this network automatically' + Style.RESET_ALL)
+    cprint(Fore.MAGENTA + Style.BRIGHT + '  g' + Style.RESET_ALL
+           + Fore.WHITE + '  —  connect to a peer on the internet' + Style.RESET_ALL)
+    cprint()
 
     while True:
         try:
-            mode = input('Mode (l/g): ').strip().lower()
+            mode = cinput('Mode (l/g): ').strip().lower()
             if mode == 'l':
                 while True:
-                    sys.stdout.write(Fore.CYAN + '  Scanning for active rooms...' + Style.RESET_ALL + '\r')
-                    sys.stdout.flush()
+                    cprint(Fore.CYAN + '  Scanning for active rooms...' + Style.RESET_ALL, end='\r')
                     rooms = discovery.scan_active_rooms(timeout=2.0)
                     sys.stdout.write('\x1b[2K')  # erase the scanning line
 
                     if rooms:
-                        sys.stdout.write(
-                            Fore.CYAN + Style.BRIGHT
-                            + f'  {len(rooms)} active room{"s" if len(rooms) != 1 else ""} on this network:\n'
-                            + Style.RESET_ALL
-                        )
+                        cprint(Fore.CYAN + Style.BRIGHT
+                               + f'  {len(rooms)} active room{"s" if len(rooms) != 1 else ""} on this network:'
+                               + Style.RESET_ALL)
                         for i, (sid, name, code, has_passcode, max_peers) in enumerate(rooms, 1):
                             label = name if name else '(unnamed)'
                             lock_icon = ' 🔒' if has_passcode else ''
-                            sys.stdout.write(
-                                Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
-                                + Fore.WHITE + f'  {label}{lock_icon}'
-                                + Fore.WHITE + Style.DIM + f'  [{max_peers} slots]\n' + Style.RESET_ALL
-                            )
-                        sys.stdout.write(
-                            Fore.MAGENTA + Style.BRIGHT + '  0' + Style.RESET_ALL
-                            + Fore.WHITE + Style.DIM + '  create a new room\n' + Style.RESET_ALL
-                        )
-                        sys.stdout.write(
-                            Fore.MAGENTA + Style.BRIGHT + '  p' + Style.RESET_ALL
-                            + Fore.WHITE + Style.DIM + '  create from preset\n' + Style.RESET_ALL
-                        )
-                        sys.stdout.flush()
+                            cprint(Fore.MAGENTA + Style.BRIGHT + f'  {i}' + Style.RESET_ALL
+                                   + Fore.WHITE + f'  {label}{lock_icon}'
+                                   + Fore.WHITE + Style.DIM + f'  [{max_peers} slots]' + Style.RESET_ALL)
+                        cprint(Fore.MAGENTA + Style.BRIGHT + '  0' + Style.RESET_ALL
+                               + Fore.WHITE + Style.DIM + '  create a new room' + Style.RESET_ALL)
+                        cprint(Fore.MAGENTA + Style.BRIGHT + '  p' + Style.RESET_ALL
+                               + Fore.WHITE + Style.DIM + '  create from preset' + Style.RESET_ALL)
 
                         while True:
-                            raw = input(f'  Join room (1–{len(rooms)}), 0 to create, p for preset: ').strip().lower()
+                            raw = cinput(f'  Join room (1–{len(rooms)}), 0 to create, p for preset: ').strip().lower()
                             if raw == 'p':
                                 choice = 'p'
                                 break
                             if not raw.isdigit():
-                                print('  Enter a number or p.')
+                                cprint('  Enter a number or p.')
                                 continue
                             choice = int(raw)
                             if 1 <= choice <= len(rooms):
@@ -227,9 +202,9 @@ if __name__ == '__main__':
                                 sid, room_name, room_code, has_passcode, max_peers = rooms[choice - 1]
                                 passcode = ''
                                 if has_passcode:
-                                    passcode = input(Fore.CYAN + '  🔒 Passcode: ' + Style.RESET_ALL).strip()
+                                    passcode = cinput(Fore.CYAN + '  🔒 Passcode: ' + Style.RESET_ALL).strip()
                                 effective_room_code = room_code + ':' + passcode if passcode else room_code
-                                print(Fore.CYAN + Style.BRIGHT + 'Joining room...' + Style.RESET_ALL)
+                                cprint(Fore.CYAN + Style.BRIGHT + 'Joining room...' + Style.RESET_ALL)
                                 UDPClient(
                                     sock,
                                     username=username,
@@ -245,18 +220,15 @@ if __name__ == '__main__':
                             elif choice == 0:
                                 break  # fall through to create flow below
                             else:
-                                print(f'  Enter a number between 0 and {len(rooms)}, or p.')
+                                cprint(f'  Enter a number between 0 and {len(rooms)}, or p.')
                         else:
                             break  # inner while exited normally (joined) — exit outer while
                         if choice not in (0, 'p'):
                             break  # joined a room, exit the scan loop
                         # choice == 0 or 'p': fall through to create/preset flow
                     else:
-                        sys.stdout.write(
-                            Fore.YELLOW + Style.BRIGHT + '  ⊘  No active rooms on this network.\n' + Style.RESET_ALL
-                        )
-                        sys.stdout.flush()
-                        action = input(
+                        cprint(Fore.YELLOW + Style.BRIGHT + '  ⊘  No active rooms on this network.' + Style.RESET_ALL)
+                        action = cinput(
                             Fore.CYAN + '  › ' + Style.RESET_ALL
                             + Fore.WHITE + 'Create a room ' + Style.RESET_ALL
                             + Fore.WHITE + Style.DIM + '(c)' + Style.RESET_ALL
@@ -286,23 +258,21 @@ if __name__ == '__main__':
 
                         _field('🏷️', 'Room name')
                         while True:
-                            room_name = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            room_name = cinput(Fore.CYAN + '  › ' + Style.RESET_ALL).strip()
                             if room_name:
                                 break
-                            sys.stdout.write(Fore.RED + '  ✖  Name cannot be empty.\n' + Style.RESET_ALL)
-                            sys.stdout.flush()
+                            cprint(Fore.RED + '  ✖  Name cannot be empty.' + Style.RESET_ALL)
 
                         _field('👥', 'Slots', 'max 32 — how many people can join')
                         while True:
-                            raw_slots = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            raw_slots = cinput(Fore.CYAN + '  › ' + Style.RESET_ALL).strip()
                             if raw_slots.isdigit() and 2 <= int(raw_slots) <= 32:
                                 max_peers = int(raw_slots)
                                 break
-                            sys.stdout.write(Fore.RED + '  ✖  Enter a number between 2 and 32.\n' + Style.RESET_ALL)
-                            sys.stdout.flush()
+                            cprint(Fore.RED + '  ✖  Enter a number between 2 and 32.' + Style.RESET_ALL)
 
                         _field('👑', 'Host mode?', 'y = you control kicks, bans and MOTD  /  n = open room')
-                        enable_host_str = input(Fore.CYAN + '     › (y/N) ' + Style.RESET_ALL).strip().lower()
+                        enable_host_str = cinput(Fore.CYAN + '  › (y/N) ' + Style.RESET_ALL).strip().lower()
                         is_host = enable_host_str == 'y'
 
                         passcode = ''
@@ -310,28 +280,24 @@ if __name__ == '__main__':
                         if is_host:
                             _field('🔒', 'Passcode', 'digits only — leave blank for an open room')
                             while True:
-                                raw_pc = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                                raw_pc = cinput(Fore.CYAN + '  › ' + Style.RESET_ALL).strip()
                                 if not raw_pc:
                                     break
                                 if raw_pc.isdigit():
                                     passcode = raw_pc
                                     break
-                                sys.stdout.write(Fore.RED + '  ✖  Digits only (or leave blank).\n' + Style.RESET_ALL)
-                                sys.stdout.flush()
+                                cprint(Fore.RED + '  ✖  Digits only (or leave blank).' + Style.RESET_ALL)
 
                             _field('📢', 'Message of the day', 'shown to everyone when they join')
-                            motd = input(Fore.CYAN + '     › ' + Style.RESET_ALL).strip()
+                            motd = cinput(Fore.CYAN + '  › ' + Style.RESET_ALL).strip()
 
                     # --- Launch the room (shared by create and preset paths) ---
                     room_code = '%016x' % random.getrandbits(64)
                     effective_room_code = room_code + ':' + passcode if passcode else room_code
 
-                    sys.stdout.write(
-                        '\n'
-                        + Fore.GREEN + Style.BRIGHT + '  ✔  Room created!' + Style.RESET_ALL
-                        + Fore.WHITE + Style.DIM + '  Waiting for peers to join...\n' + Style.RESET_ALL
-                    )
-                    sys.stdout.flush()
+                    cprint()
+                    cprint(Fore.GREEN + Style.BRIGHT + '  ✔  Room created!' + Style.RESET_ALL
+                           + Fore.WHITE + Style.DIM + '  Waiting for peers to join...' + Style.RESET_ALL)
 
                     UDPClient(
                         sock,
@@ -349,17 +315,16 @@ if __name__ == '__main__':
                     )
                     break
             elif mode == 'g':
-                peer_ip = input("Peer's public IP: ").strip()
+                peer_ip = cinput("Peer's public IP: ").strip()
                 if not peer_ip:
                     continue
-                peer_port = int(input("Peer's port: ").strip())
+                peer_port = int(cinput("Peer's port: ").strip())
                 if anonymous:
-                    print(Fore.CYAN + Style.BRIGHT
-                          + 'Connecting...' + Style.RESET_ALL)
+                    cprint(Fore.CYAN + Style.BRIGHT + 'Connecting...' + Style.RESET_ALL)
                 else:
-                    print(Fore.CYAN + Style.BRIGHT
-                          + 'Connecting... others can join by entering your IP and port above.'
-                          + Style.RESET_ALL)
+                    cprint(Fore.CYAN + Style.BRIGHT
+                           + 'Connecting... others can join by entering your IP and port above.'
+                           + Style.RESET_ALL)
                 UDPClient(
                     sock,
                     username=username,
@@ -369,7 +334,7 @@ if __name__ == '__main__':
                     anonymous=anonymous,
                 )
             else:
-                print('Enter l or g.')
+                cprint('Enter l or g.')
         except KeyboardInterrupt:
-            print('\nExiting...')
+            cprint('\nExiting...')
             sys.exit(0)

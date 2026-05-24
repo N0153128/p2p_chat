@@ -29,18 +29,39 @@ def _visible_len(s):
     return len(_ANSI_RE.sub('', s))
 
 
-def _center_pad(s):
-    """Return a left-padding string so *s* is centred in the terminal.
+_CENTER_BIAS = 8
+"""Columns to shift centre-aligned output leftward from true centre."""
 
-    Only adds padding when ``ui.centered`` is True.  The padding is a plain
-    space string — callers prepend it before their coloured text.
+
+def _center_pad(s):
+    """Return a left-padding string so *s* is near-centred in the terminal.
+
+    Only adds padding when ``ui.centered`` is True.  The result is shifted
+    slightly left of true centre (by _CENTER_BIAS columns) so it feels more
+    natural on wide terminals.
     """
     if not centered:
         return ''
     cols, _ = _term_size()
     vlen = _visible_len(s)
-    pad = max(0, (cols - vlen) // 2)
+    pad = max(0, (cols - vlen) // 2 - _CENTER_BIAS)
     return ' ' * pad
+
+
+def cprint(text='', end='\n'):
+    """Print *text* centred (or normally when centered=False).
+
+    Accepts plain strings or ANSI-coloured strings; measures visible width
+    correctly.  Use in place of ``print()`` / ``sys.stdout.write()`` for
+    all pre-session output lines.
+    """
+    sys.stdout.write(_center_pad(text) + text + end)
+    sys.stdout.flush()
+
+
+def cinput(prompt):
+    """Like ``input()`` but the prompt is centred when centered=True."""
+    return input(_center_pad(prompt) + prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -613,23 +634,17 @@ def pick_colour(prompt, default_name):
     base_lines = 1 + len(COLOURS) + 1
     extra_lines = 0  # error lines accumulate here
 
-    sys.stdout.write(Style.BRIGHT + Fore.WHITE + prompt + Style.RESET_ALL + '\n')
+    cprint(Style.BRIGHT + Fore.WHITE + prompt + Style.RESET_ALL)
     for i, (name, code) in enumerate(COLOURS, 1):
-        sys.stdout.write(
-            f'  {Style.BRIGHT}{code}{i}{Style.RESET_ALL}'
-            f'  {code}{name}{Style.RESET_ALL}\n'
-        )
-    sys.stdout.flush()
+        cprint(f'  {Style.BRIGHT}{code}{i}{Style.RESET_ALL}'
+               f'  {code}{name}{Style.RESET_ALL}')
     while True:
-        raw = input(f'  Choose (1-{len(COLOURS)}, default {default_name}): ').strip()
+        raw = cinput(f'  Choose (1-{len(COLOURS)}, default {default_name}): ').strip()
         if not raw:
             _erase_lines(base_lines + extra_lines)
             return default_name, colour_for(default_name)
         if raw.isdigit() and 1 <= int(raw) <= len(COLOURS):
             _erase_lines(base_lines + extra_lines)
             return COLOURS[int(raw) - 1]
-        sys.stdout.write(
-            Fore.RED + f'  Enter a number between 1 and {len(COLOURS)}.\n' + Style.RESET_ALL
-        )
-        sys.stdout.flush()
+        cprint(Fore.RED + f'  Enter a number between 1 and {len(COLOURS)}.' + Style.RESET_ALL)
         extra_lines += 1
