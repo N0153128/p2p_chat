@@ -314,9 +314,12 @@ class UDPClient:
                + Fore.WHITE + Style.DIM + '─' * 4 + Style.RESET_ALL)
         return bar
 
-    def _log(self, sender, body):
+    def _log(self, sender, body, name_colour=None, text_colour=None):
         """Append a message to the room's history log (no-op if no room name)."""
-        db.log_message(self.room_name, sender, body)
+        from ui import COLOURS
+        nc_name = next((n for n, c in COLOURS if c == name_colour), 'white') if name_colour else 'white'
+        tc_name = next((n for n, c in COLOURS if c == text_colour), 'white') if text_colour else 'white'
+        db.log_message(self.room_name, sender, body, nc_name, tc_name)
 
     def _redraw_statusbar(self):
         """Repaint the full bottom panel from any thread (acquires print_lock)."""
@@ -586,10 +589,11 @@ class UDPClient:
 
         try:
             while not self.done.is_set():
-                try:
-                    disc.sendto(my_beacon, (broadcast, discovery.DISCOVERY_PORT))
-                except Exception:
-                    pass
+                if self.is_host:
+                    try:
+                        disc.sendto(my_beacon, (broadcast, discovery.DISCOVERY_PORT))
+                    except Exception:
+                        pass
 
                 try:
                     data, addr = disc.recvfrom(4096)
@@ -920,11 +924,11 @@ class UDPClient:
                 body_part = text[split_at + 2:]
                 ui.print_msg(name_part, body_part,
                              name_colour=name_colour, text_colour=text_colour, alert=not muted)
-                self._log(name_part, body_part)
+                self._log(name_part, body_part, name_colour=name_colour, text_colour=text_colour)
             else:
                 ui.print_msg('', text,
                              name_colour=name_colour, text_colour=text_colour, alert=not muted)
-                self._log('', text)
+                self._log('', text, name_colour=name_colour, text_colour=text_colour)
 
         try:
             self.sock.settimeout(None)
@@ -1293,6 +1297,7 @@ class UDPClient:
                     tracker = _MsgTracker(msg_id, targets, update_fn)
                     with self._ack_lock:
                         self._ack_trackers[msg_id] = tracker
-                    self._log(f'(you) <{self.username}>', f': {msg}')
+                    self._log(f'(you) <{self.username}>', f': {msg}',
+                              name_colour=self.name_colour, text_colour=self.text_colour)
         except (KeyboardInterrupt, EOFError):
             pass

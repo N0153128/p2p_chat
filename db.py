@@ -75,16 +75,28 @@ def _init(conn):
         );
 
         CREATE TABLE IF NOT EXISTS message_log (
-            id        INTEGER PRIMARY KEY AUTOINCREMENT,
-            room      TEXT    NOT NULL,
-            sender    TEXT    NOT NULL,
-            body      TEXT    NOT NULL,
-            ts        TEXT    DEFAULT (strftime('%H:%M', 'now', 'localtime'))
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            room         TEXT    NOT NULL,
+            sender       TEXT    NOT NULL,
+            body         TEXT    NOT NULL,
+            ts           TEXT    DEFAULT (strftime('%H:%M', 'now', 'localtime')),
+            name_colour  TEXT    NOT NULL DEFAULT 'white',
+            text_colour  TEXT    NOT NULL DEFAULT 'white'
         );
 
         CREATE INDEX IF NOT EXISTS message_log_room ON message_log(room, id);
     """)
-    conn.commit()
+    # Add colour columns to existing databases that predate this schema.
+    try:
+        conn.execute("ALTER TABLE message_log ADD COLUMN name_colour TEXT NOT NULL DEFAULT 'white'")
+        conn.commit()
+    except Exception:
+        pass
+    try:
+        conn.execute("ALTER TABLE message_log ADD COLUMN text_colour TEXT NOT NULL DEFAULT 'white'")
+        conn.commit()
+    except Exception:
+        pass
 
 
 def _get_box(conn):
@@ -235,24 +247,27 @@ def set_setting(key, value):
 # Message log
 # ---------------------------------------------------------------------------
 
-def log_message(room, sender, body):
+def log_message(room, sender, body, name_colour='white', text_colour='white'):
     """Append a message to the rolling log for *room*.
 
     ANSI codes are stripped before storage.  If the room's row count
     exceeds MSG_LOG_LIMIT the oldest rows are pruned immediately.
 
     Args:
-        room:   Room name string used as the partition key.
-        sender: Display name of the sender (plain text).
-        body:   Message body text (plain text or ANSI — ANSI is stripped).
+        room:         Room name string used as the partition key.
+        sender:       Display name of the sender (plain text).
+        body:         Message body text (plain text or ANSI — ANSI is stripped).
+        name_colour:  Colour name string for the sender (e.g. ``'cyan'``).
+        text_colour:  Colour name string for the message body.
     """
     if not room:
         return
     conn = _connect()
     _init(conn)
     conn.execute(
-        "INSERT INTO message_log (room, sender, body) VALUES (?, ?, ?)",
-        (room, _strip_ansi(sender), _strip_ansi(body)),
+        "INSERT INTO message_log (room, sender, body, name_colour, text_colour)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (room, _strip_ansi(sender), _strip_ansi(body), name_colour, text_colour),
     )
     # Prune oldest rows beyond the cap for this room.
     conn.execute(
@@ -274,18 +289,29 @@ def load_history(room, limit=MSG_LOG_LIMIT):
         limit: Maximum number of rows to return.
 
     Returns:
-        List of dicts with keys: ``sender``, ``body``, ``ts``.
+        List of dicts with keys: ``sender``, ``body``, ``ts``,
+        ``name_colour``, ``text_colour``.
     """
     if not room:
         return []
     conn = _connect()
     _init(conn)
     rows = conn.execute(
-        """SELECT sender, body, ts FROM (
-               SELECT sender, body, ts, id FROM message_log
+        """SELECT sender, body, ts, name_colour, text_colour FROM (
+               SELECT sender, body, ts, name_colour, text_colour, id
+               FROM message_log
                WHERE room=? ORDER BY id DESC LIMIT ?
            ) ORDER BY id ASC""",
         (room, limit),
     ).fetchall()
     conn.close()
-    return [{'sender': r['sender'], 'body': r['body'], 'ts': r['ts']} for r in rows]
+    return [
+        {
+            'sender': r['sender'],
+            'body': r['body'],
+            'ts': r['ts'],
+            'name_colour': r['name_colour'],
+            'text_colour': r['text_colour'],
+        }
+        for r in rows
+    ]

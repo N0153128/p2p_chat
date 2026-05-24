@@ -415,7 +415,8 @@ def print_history(messages):
 
     Args:
         messages: List of dicts with keys ``sender``, ``body``, ``ts``,
-                  as returned by ``db.load_history()``.
+                  ``name_colour``, ``text_colour``, as returned by
+                  ``db.load_history()``.
     """
     if not messages:
         return
@@ -426,13 +427,17 @@ def print_history(messages):
     header = (Fore.WHITE + Style.DIM
               + '─' * pad + label + '─' * (cols - pad - len(label))
               + Style.RESET_ALL)
-    sys.stdout.write(f'\x1b[{rows - 4};1H')
+    # Write from row 1 of the scroll region so messages fill from the top and
+    # scroll up naturally rather than all piling at the bottom boundary.
+    sys.stdout.write('\x1b[1;1H')
     sys.stdout.write(header + '\n')
     for m in messages:
         ts = Fore.WHITE + Style.DIM + m['ts'] + Style.RESET_ALL
-        sender = Style.BRIGHT + m['sender'] + Style.RESET_ALL
-        body = m['body']
-        sys.stdout.write(f'{ts}  {sender}: {body}\n')
+        nc = colour_for(m.get('name_colour', 'white'))
+        tc = colour_for(m.get('text_colour', 'white'))
+        sender = Style.BRIGHT + nc + m['sender'] + Style.RESET_ALL
+        body = tc + m['body'] + Style.RESET_ALL
+        sys.stdout.write(f'{ts}  {sender}{body}\n')
     sys.stdout.write(dim_line + '\n')
     sys.stdout.flush()
 
@@ -478,8 +483,8 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
     - ``'partial'`` — replace with yellow ``✓`` (some peers missed)
     - ``'fail'`` — replace with red ``✗``
 
-    The updater uses cursor-up to overwrite the indicator on the same line.
-    If the line has scrolled off screen the update is silently skipped.
+    The updater uses absolute row positioning to overwrite the indicator.
+    If the message has scrolled out of the scroll region the update is a no-op.
     The updater is thread-safe and idempotent (only fires once).
 
     Args:
@@ -492,7 +497,9 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
         ``update(status)`` callable.
     """
     cols, rows = _term_size()
-    # Indicator sits at a fixed column near the right margin.
+    # The message is written at the bottom of the scroll region (rows-4).
+    # After the \n the terminal scrolls, so the message ends up at rows-5.
+    msg_row = rows - 5
     indicator_col = max(cols - 3, 1)
     _fired = threading.Event()
 
@@ -503,12 +510,8 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
             Style.BRIGHT + name_colour + username_part + Style.RESET_ALL
             + text_colour + text_part + Style.RESET_ALL
         )
-        # Pending indicator at the right margin on the same line.
         pending = Fore.WHITE + Style.DIM + ' ⧖' + Style.RESET_ALL
         sys.stdout.write(line + pending + '\n')
-        # Save cursor position immediately after the \n (now on the next line).
-        # We'll use cursor-up to get back to the indicator column.
-        sys.stdout.write(_SAVE_CUR)
         _paint_panel()
         sys.stdout.flush()
 
@@ -523,19 +526,16 @@ def print_msg_pending(username_part, text_part, name_colour=Fore.CYAN, text_colo
         else:
             icon = Fore.RED + Style.BRIGHT + ' ✗' + Style.RESET_ALL
         with print_lock:
-            # Restore to the saved position (line after the message),
-            # go up 1 line, move to indicator column, overwrite.
-            sys.stdout.write(
-                _REST_CUR
-                + '\x1b[1A'                              # up one line
-                + f'\x1b[{indicator_col}G'               # move to column
-                + '\x1b[2K\x1b[0G'                       # erase rest of line ... actually just overwrite
-                + f'\x1b[{indicator_col}G'
-                + icon
-                + _SAVE_CUR                              # update saved pos so future repaints still work
-            )
-            _paint_panel()
-            sys.stdout.flush()
+            # Use absolute positioning to the row where we printed the message.
+            # If msg_row < 1 the message has scrolled out of the region; skip.
+            if msg_row >= 1:
+                sys.stdout.write(
+                    _SAVE_CUR
+                    + f'\x1b[{msg_row};{indicator_col}H'
+                    + icon
+                    + _REST_CUR
+                )
+                sys.stdout.flush()
 
     return update
 
